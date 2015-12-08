@@ -1,5 +1,5 @@
 # jniFeiertage
-
+abgekupfert von Dave zum 1. test für mich
 Dieses Modul zeigt an, ob es sich heute um einen Feiertag handelt.
 Im Konfigurationsformular muss das Bundesland ausgewählt werden.
 
