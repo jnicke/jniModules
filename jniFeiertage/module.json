@@ -1,8 +1,8 @@
 {
-    "id": "{34D2129B-2F30-412D-B8EC-A103738C4B99}",
+    "id": "{54E65B99-340B-4BDD-8045-7B0DFF12FF86}",
     "name": "jniFeiertage",
     "type": 3,
-    "vendor": "jnicke",
+    "vendor": "",
     "aliases": 
     [
         "jniFeiertage"
@@ -10,5 +10,5 @@
     "parentRequirements": [],
     "childRequirements": [],
     "implemented": [],
-    "prefix": "IQLFT"
+    "prefix": "jniFT"
 }
