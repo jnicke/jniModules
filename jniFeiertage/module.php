@@ -1,5 +1,5 @@
 <?
-class IQLFeiertage extends IPSModule {
+class jniFeiertage extends IPSModule {
 		
 	public function Create() {
 		//Never delete this line!
