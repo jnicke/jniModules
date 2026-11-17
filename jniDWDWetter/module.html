@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="/icons.js"></script>
+<style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+        font-family: inherit;
+        color: var(--content-color);
+        font-size: var(--font-size, 14px);
+        padding: var(--margin-top, 10px) var(--margin-side, 12px) var(--margin-bottom, 10px);
+        display: flex;
+        flex-direction: column;
+        gap: 0.7em;
+        -webkit-font-smoothing: antialiased;
+    }
+    .gedimmt { opacity: 0.62; }
+
+    /* ---------- aktuell ---------- */
+    .jetzt { display: flex; align-items: center; gap: 0.8em; flex: 0 0 auto; }
+    .jetzt .symbol { font-size: 3.1em; line-height: 1; width: 1.25em; text-align: center; color: var(--accent-color); }
+    .jetzt .temp { font-size: 2.6em; font-weight: 300; line-height: 1; letter-spacing: -0.02em; }
+    .jetzt .info { display: flex; flex-direction: column; gap: 0.15em; min-width: 0; }
+    .jetzt .zustand { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 0.35em 0.9em; flex: 0 0 auto; font-size: 0.92em; }
+    .chips span { white-space: nowrap; }
+    .chips i { width: 1.15em; text-align: center; opacity: 0.75; margin-right: 0.15em; }
+
+    /* ---------- Tage ---------- */
+    .tage { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: hidden;
+            display: flex; flex-direction: column; }
+    .tag {
+        display: grid;
+        grid-template-columns: 3.4em 1.7em 2.9em 2.4em 1fr 2.4em;
+        align-items: center;
+        gap: 0 0.45em;
+        padding: 0.38em 0;
+        border-top: 1px solid color-mix(in srgb, var(--content-color) 12%, transparent);
+    }
+    .tag:first-child { border-top: none; }
+    .tag .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tag .symbol { font-size: 1.2em; text-align: center; color: var(--accent-color); }
+    .tag .prob { font-size: 0.82em; color: #4aa3ff; text-align: left; white-space: nowrap; }
+    .tag .min { text-align: right; opacity: 0.62; }
+    .tag .max { text-align: left; font-weight: 600; }
+    .balken { position: relative; height: 0.32em; border-radius: 1em;
+              background: color-mix(in srgb, var(--content-color) 13%, transparent); }
+    .balken .fuell { position: absolute; top: 0; bottom: 0; border-radius: 1em;
+                     background-image: linear-gradient(90deg, #4aa3ff 0%, #5ad1c8 30%, #f5d547 60%, #ff9f43 80%, #ff6b5a 100%); }
+
+    /* ---------- Text (nur bei viel Platz / Vollbild) ---------- */
+    .text { display: none; overflow-y: auto; flex: 0 1 auto; min-height: 0; line-height: 1.45; font-size: 0.95em; }
+    .text h4 { margin: 0.6em 0 0.25em; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; }
+    .text p { margin: 0; white-space: pre-line; }
+    body.gross .text { display: block; }
+    body.gross .tage { flex: 0 0 auto; }
+
+    .fuss { flex: 0 0 auto; font-size: 0.75em; display: flex; justify-content: space-between; }
+    body.klein .chips, body.klein .fuss { display: none; }
+    body.mini .tage { display: none; }
+</style>
+</head>
+<body>
+    <div class="jetzt">
+        <i class="symbol fa-light fa-cloud" id="jSymbol"></i>
+        <div class="temp" id="jTemp">–</div>
+        <div class="info">
+            <span class="zustand" id="jZustand"></span>
+            <span class="gedimmt" id="jHL"></span>
+        </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <ul class="tage" id="tage"></ul>
+    <div class="text" id="text"></div>
+    <div class="fuss gedimmt"><span>Deutscher Wetterdienst</span><span id="stand"></span></div>
+
+<script>
+    const START = /*DATEN*/null;
+
+    const SYMBOL = {
+        'sunny': ['fa-sun', 'fa-moon'],
+        'clear-night': ['fa-moon', 'fa-moon'],
+        'partlycloudy': ['fa-cloud-sun', 'fa-cloud-moon'],
+        'cloudy': ['fa-cloud', 'fa-cloud'],
+        'fog': ['fa-smog', 'fa-smog'],
+        'rainy': ['fa-cloud-rain', 'fa-cloud-moon-rain'],
+        'pouring': ['fa-cloud-showers-heavy', 'fa-cloud-showers-heavy'],
+        'snowy': ['fa-snowflake', 'fa-snowflake'],
+        'snowy-rainy': ['fa-cloud-sleet', 'fa-cloud-sleet'],
+        'hail': ['fa-cloud-hail', 'fa-cloud-hail'],
+        'lightning': ['fa-cloud-bolt', 'fa-cloud-bolt'],
+        'lightning-rainy': ['fa-cloud-bolt', 'fa-cloud-bolt'],
+        'windy': ['fa-wind', 'fa-wind'],
+        'windy-variant': ['fa-wind', 'fa-wind'],
+        'exceptional': ['fa-triangle-exclamation', 'fa-triangle-exclamation']
+    };
+
+    function symbol(zustand, nacht) {
+        const s = SYMBOL[zustand] || ['fa-cloud-question', 'fa-cloud-question'];
+        return 'fa-light ' + s[nacht ? 1 : 0];
+    }
+    function zahl(w, stellen) {
+        if (w === null || w === undefined || w === '') return '–';
+        return Number(w).toLocaleString('de-DE', { minimumFractionDigits: stellen, maximumFractionDigits: stellen });
+    }
+    function grad(w) { return (w === null || w === undefined) ? '–' : Math.round(w) + '°'; }
+    function el(tag, klasse, text) {
+        const e = document.createElement(tag);
+        if (klasse) e.className = klasse;
+        if (text !== undefined) e.textContent = text;
+        return e;
+    }
+
+    let daten = START;
+
+    function zeichne() {
+        if (!daten) return;
+        const a = daten.aktuell || {};
+        const tage = daten.tage || [];
+        const heute = tage[0] || {};
+
+        document.getElementById('jSymbol').className = 'symbol ' + symbol(heute.zustand, !daten.tag);
+        document.getElementById('jTemp').textContent = a.temp === null || a.temp === undefined ? '–' : zahl(a.temp, 1) + '°';
+        document.getElementById('jZustand').textContent = heute.text || '';
+        document.getElementById('jHL').textContent = 'H ' + grad(heute.max) + '  ·  T ' + grad(heute.min);
+
+        // Chips
+        const chips = document.getElementById('chips');
+        chips.replaceChildren();
+        const chip = (icon, text) => { const s = el('span'); s.append(el('i', 'fa-light ' + icon), document.createTextNode(text)); chips.append(s); };
+        chip('fa-wind', zahl(a.wind, 0) + ' km/h' + (a.boeen ? ' (Böen ' + zahl(a.boeen, 0) + ')' : ''));
+        chip('fa-droplet', zahl(a.regen, 1) + ' mm/h');
+        chip('fa-cloud', zahl(a.wolken, 0) + ' %');
+        if (a.uv !== null && a.uv !== undefined) chip('fa-sun-bright', 'UV ' + a.uv);
+
+        // Tage mit Temperaturbalken (gemeinsame Skala)
+        const liste = document.getElementById('tage');
+        liste.replaceChildren();
+        const mins = tage.map(t => t.min).filter(v => v !== null && v !== undefined);
+        const maxs = tage.map(t => t.max).filter(v => v !== null && v !== undefined);
+        const lo = Math.min(...mins), hi = Math.max(...maxs), span = Math.max(1, hi - lo);
+        tage.forEach((t, i) => {
+            const z = el('li', 'tag');
+            z.title = t.datum + ' – ' + t.text;
+            z.append(el('span', 'name', t.name));
+            z.append(el('i', 'symbol ' + symbol(t.zustand, false)));
+            z.append(el('span', 'prob', t.prob >= 20 ? t.prob + ' %' : ''));
+            z.append(el('span', 'min', grad(t.min)));
+            const b = el('div', 'balken'), f = el('div', 'fuell');
+            const links = ((t.min - lo) / span) * 100, breite = Math.max(4, ((t.max - t.min) / span) * 100);
+            f.style.left = links + '%';
+            f.style.width = breite + '%';
+            f.style.backgroundSize = (10000 / breite) + '% 100%';
+            f.style.backgroundPosition = (breite >= 100 ? 0 : (links / (100 - breite)) * 100) + '% 0';
+            b.append(f);
+            z.append(b);
+            z.append(el('span', 'max', grad(t.max)));
+            liste.append(z);
+        });
+
+        // Textvorhersage
+        const text = document.getElementById('text');
+        text.replaceChildren();
+        const tx = daten.texte || {};
+        [['Heute', tx.heute], ['Morgen', tx.morgen]].forEach(([titel, inhalt]) => {
+            if (!inhalt) return;
+            text.append(el('h4', '', titel));
+            text.append(el('p', '', inhalt.replace(/!$/, '').replace(/\r/g, '').replace(/\n\s*\n+/g, '\n')));
+        });
+
+        document.getElementById('stand').textContent = daten.stand ? 'Stand ' + daten.stand : '';
+        passe();
+    }
+
+    // Inhalt an die Kachelgröße anpassen
+    function passe() {
+        const h = window.innerHeight, w = window.innerWidth;
+        document.body.classList.toggle('mini', h < 150);
+        document.body.classList.toggle('klein', h < 260 || w < 230);
+        document.body.classList.toggle('gross', h >= 560 && w >= 420);
+        // nur so viele Tage zeigen, wie vollständig hineinpassen
+        const liste = document.getElementById('tage');
+        const zeilen = Array.from(liste.children);
+        zeilen.forEach(z => z.style.display = '');
+        if (document.body.classList.contains('gross')) return;
+        const platz = liste.getBoundingClientRect().height;
+        let summe = 0;
+        zeilen.forEach(z => {
+            summe += z.getBoundingClientRect().height;
+            if (summe > platz + 1) z.style.display = 'none';
+        });
+    }
+
+    function handleMessage(nachricht) {
+        try { daten = typeof nachricht === 'string' ? JSON.parse(nachricht) : nachricht; } catch (e) { return; }
+        zeichne();
+    }
+
+    window.addEventListener('resize', passe);
+    zeichne();
+</script>
+</body>
+</html>

@@ -1,0 +1,99 @@
+{
+    "elements": [
+        {
+            "type": "ExpansionPanel",
+            "caption": "Standort",
+            "expanded": true,
+            "items": [
+                {
+                    "type": "ValidationTextBox",
+                    "name": "Station",
+                    "caption": "MOSMIX-Station (Kennung, z. B. O458 = Dresden-Hosterwitz, 10488 = Dresden-Flughafen)",
+                    "validate": "^[A-Za-z0-9]{4,5}$"
+                },
+                {
+                    "type": "Label",
+                    "caption": "Stationskatalog: https://www.dwd.de/DE/leistungen/met_verfahren_mosmix/mosmix_stationskatalog.cfg"
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "Latitude", "caption": "Breitengrad", "digits": 4 },
+                        { "type": "NumberSpinner", "name": "Longitude", "caption": "Längengrad", "digits": 4 }
+                    ]
+                },
+                {
+                    "type": "Label",
+                    "caption": "Die Koordinaten werden nur für den UV-Index (Open-Meteo) benötigt."
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Vorhersage",
+            "items": [
+                { "type": "NumberSpinner", "name": "Tage", "caption": "Anzahl Vorhersagetage (1–10)", "minimum": 1, "maximum": 10 },
+                { "type": "NumberSpinner", "name": "Intervall", "caption": "Aktualisierung der aktuellen Werte", "suffix": "Minuten", "minimum": 1, "maximum": 60 },
+                { "type": "NumberSpinner", "name": "CacheMinuten", "caption": "DWD höchstens abrufen alle", "suffix": "Minuten", "minimum": 5, "maximum": 180 },
+                { "type": "NumberSpinner", "name": "RegenStunden", "caption": "Niederschlag/Gewitter/Nebel als Tageszustand ab", "suffix": "Stunden", "minimum": 1, "maximum": 12 },
+                { "type": "CheckBox", "name": "UVOpenMeteo", "caption": "UV-Index (Tagesmaximum) von Open-Meteo abrufen" }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Textvorhersage",
+            "items": [
+                { "type": "CheckBox", "name": "TextAktiv", "caption": "DWD-Textberichte abrufen (Heute, Morgen, Übermorgen, Tag 4)" },
+                {
+                    "type": "Select",
+                    "name": "TextKennung",
+                    "caption": "Region",
+                    "options": [
+                        { "caption": "Baden-Württemberg", "value": "DWSG" },
+                        { "caption": "Bayern", "value": "DWMG" },
+                        { "caption": "Berlin und Brandenburg", "value": "DWPG" },
+                        { "caption": "Hessen", "value": "DWEG" },
+                        { "caption": "Mecklenburg-Vorpommern", "value": "DWPH" },
+                        { "caption": "Niedersachsen und Bremen", "value": "DWHG" },
+                        { "caption": "Nordrhein-Westfalen", "value": "DWEH" },
+                        { "caption": "Rheinland-Pfalz und Saarland", "value": "DWEI" },
+                        { "caption": "Sachsen", "value": "DWLG" },
+                        { "caption": "Sachsen-Anhalt", "value": "DWLH" },
+                        { "caption": "Schleswig-Holstein und Hamburg", "value": "DWHH" },
+                        { "caption": "Thüringen", "value": "DWLI" }
+                    ]
+                },
+                { "type": "ValidationTextBox", "name": "TextAnhang", "caption": "Zeichen am Textende anhängen (Kompatibilität, z. B. „!“)" },
+                { "type": "CheckBox", "name": "BerichtDateien", "caption": "Berichte zusätzlich als Dateien schreiben (für alte Wetterbericht-Seiten, ISO-8859-1)" },
+                { "type": "ValidationTextBox", "name": "BerichtPfad", "caption": "Ordner relativ zum Symcon-Verzeichnis" }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Darstellung",
+            "items": [
+                { "type": "SelectVariable", "name": "IstTagVariable", "caption": "Variable „Ist es Tag“ (Tag-/Nachtsymbol für heute)", "validVariableTypes": [0] },
+                { "type": "CheckBox", "name": "Symbole", "caption": "Wettersymbole als Medienobjekte bereitstellen" },
+                {
+                    "type": "Select",
+                    "name": "Symbolsatz",
+                    "caption": "Symbolsatz",
+                    "options": [
+                        { "caption": "Meteocons (im Modul enthalten)", "value": "meteocons" },
+                        { "caption": "Eigener Symbol-Ordner (VClouds-Nummerierung)", "value": "ordner" }
+                    ]
+                },
+                { "type": "ValidationTextBox", "name": "SymbolPfad", "caption": "Eigener Symbol-Ordner relativ zum Symcon-Verzeichnis (0.png–47.png, fehlende Bilder → Meteocons)" }
+            ]
+        }
+    ],
+    "actions": [
+        { "type": "Button", "caption": "Jetzt aktualisieren", "onClick": "DWDW_Update($id);" },
+        { "type": "Label", "name": "Info", "caption": "" }
+    ],
+    "status": [
+        { "code": 102, "icon": "active", "caption": "Aktiv" },
+        { "code": 201, "icon": "error", "caption": "DWD-Daten konnten nicht abgerufen werden" },
+        { "code": 202, "icon": "error", "caption": "Ungültige MOSMIX-Station" }
+    ]
+}

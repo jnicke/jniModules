@@ -1,0 +1,17 @@
+{
+    "id": "{CB3B7AAA-49D2-4F37-ACAC-DE78D445EBFE}",
+    "name": "jniDWDWetter",
+    "type": 3,
+    "vendor": "Deutscher Wetterdienst",
+    "aliases":
+    [
+        "DWD Wetter",
+        "DWD Wettervorhersage",
+        "jniDWDWetter"
+    ],
+    "url": "https://opendata.dwd.de",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "prefix": "DWDW"
+}
