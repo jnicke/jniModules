@@ -18,6 +18,13 @@ declare(strict_types=1);
  *                  Fallback ohne Historie: Wochentags-Median der letzten n Wochen
  *  - Plan:         Planverbrauch saisonal verteilt nach dem Verlauf der Vorperiode
  *
+ * Zählerwechsel:
+ *  - Frühere Zähler werden mit Ausbautag und eigenem Faktor angegeben. Bis einschließlich Ausbautag zählt der
+ *    alte Zähler, ab Ausbautag der Nachfolger (am Wechseltag werden beide addiert – jeder liefert nur in
+ *    seiner Laufzeit Zuwächse).
+ *  - Optional wird die Lücke zwischen letztem Wert des alten und erstem Wert des neuen Zählers geschätzt:
+ *    (erster Wert Nachfolger − Anfangsstand) × Faktor des Nachfolgers, gleichmäßig auf die Stunden verteilt.
+ *
  * Ausgabe:
  *  - einfache Float-Variablen mit klassischen Profilen (IPSView-tauglich)
  *  - Diagramme (Chart.js) über WebHook /hook/efc<InstanzID>?chart=dashboard|today|week|months|period
@@ -33,6 +40,7 @@ class jniEnergyForecast extends IPSModule
     private const STATUS_NOT_COUNTER  = 201;
     private const STATUS_TOO_FEW_DATA = 202;
     private const STATUS_BAD_PERIOD   = 203;
+    private const STATUS_BAD_CHANGE   = 204;
 
     private const MONTH_NAMES   = [1 => 'Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
     private const WEEKDAY_NAMES = [1 => 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -47,6 +55,8 @@ class jniEnergyForecast extends IPSModule
     private array $weekdayFactor = [];
     private array $weekdayMedian = [];
     private int $todayTs = 0;
+    private array $segments = [];
+    private array $gapHours = [];
 
     public function Create()
     {
@@ -55,6 +65,7 @@ class jniEnergyForecast extends IPSModule
         $this->RegisterPropertyInteger('CounterVariableID', 0);
         $this->RegisterPropertyFloat('ScaleFactor', 1.0);
         $this->RegisterPropertyString('Unit', 'kWh');
+        $this->RegisterPropertyString('MeterChanges', '[]');
         $this->RegisterPropertyString('PeriodStart', '01.01.');
         $this->RegisterPropertyFloat('PricePerUnit', 0.0);      // ct je Einheit, brutto
         $this->RegisterPropertyFloat('BasePrice', 0.0);         // € je Monat, brutto
@@ -121,6 +132,20 @@ class jniEnergyForecast extends IPSModule
             }
             if ($changed) {
                 IPS_ApplyChanges($ac);
+            }
+        }
+
+        // ---------- Referenzen (Zählervariablen) ----------
+        foreach ($this->GetReferenceList() as $ref) {
+            $this->UnregisterReference($ref);
+        }
+        $cid = $this->ReadPropertyInteger('CounterVariableID');
+        if ($cid > 0 && IPS_VariableExists($cid)) {
+            $this->RegisterReference($cid);
+        }
+        foreach ($this->ParseMeterChanges() ?? [] as $c) {
+            if (IPS_VariableExists($c['vid'])) {
+                $this->RegisterReference($c['vid']);
             }
         }
 
@@ -224,13 +249,12 @@ class jniEnergyForecast extends IPSModule
         }
 
         $ac    = $this->ArchiveID();
-        $cid   = $this->ReadPropertyInteger('CounterVariableID');
-        $scale = $this->ReadPropertyFloat('ScaleFactor');
         $weeks = max(2, $this->ReadPropertyInteger('ProfileWeeks'));
         $now   = time();
         $today = mktime(0, 0, 0, (int) date('n'), (int) date('j'), (int) date('Y'));
         $this->todayTs    = $today;
         $this->levelCache = [];
+        $this->PrepareCounter($ac);
 
         [$pStart, $pEnd] = $this->PeriodBounds($today);
         $nStart = $this->AddDays($pEnd, 1);
@@ -239,8 +263,8 @@ class jniEnergyForecast extends IPSModule
         // ---------- Tageswerte (bis gestern) ----------
         $histStart = min($this->AddDays($pStart, -400), mktime(0, 0, 0, (int) date('n'), (int) date('j') - 7, (int) date('Y') - 3));
         $this->daily = [];
-        foreach (AC_GetAggregatedValues($ac, $cid, 1, $histStart, $today - 1, 0) as $row) {
-            $v = (float) $row['Avg'] * $scale;
+        foreach ($this->CounterValues(1, $histStart, $today - 1) as $row) {
+            $v = (float) $row['Avg'];
             if ($v >= 0) {
                 $this->daily[date('Y-m-d', (int) $row['TimeStamp'])] = $v;
             }
@@ -253,12 +277,12 @@ class jniEnergyForecast extends IPSModule
 
         // ---------- Heute Ist (gesamt + je Stunde) ----------
         $todayActual = 0.0;
-        foreach (AC_GetAggregatedValues($ac, $cid, 1, $today, $now, 0) as $row) {
-            $todayActual += max(0.0, (float) $row['Avg'] * $scale);
+        foreach ($this->CounterValues(1, $today, $now) as $row) {
+            $todayActual += max(0.0, (float) $row['Avg']);
         }
         $todayH = array_fill(0, 24, 0.0);
-        foreach (AC_GetAggregatedValues($ac, $cid, 0, $today, $now, 0) as $row) {
-            $todayH[(int) date('G', (int) $row['TimeStamp'])] += max(0.0, (float) $row['Avg'] * $scale);
+        foreach ($this->CounterValues(0, $today, $now) as $row) {
+            $todayH[(int) date('G', (int) $row['TimeStamp'])] += max(0.0, (float) $row['Avg']);
         }
 
         // ---------- Wochentagsstatistik der letzten n Wochen ----------
@@ -292,9 +316,9 @@ class jniEnergyForecast extends IPSModule
         $yesterday = $this->AddDays($today, -1);
         $yestH     = array_fill(0, 24, null);
         $wdToday   = (int) date('N', $today);
-        foreach (AC_GetAggregatedValues($ac, $cid, 0, $this->AddDays($today, -$weeks * 7), $today - 1, 0) as $row) {
+        foreach ($this->CounterValues(0, $this->AddDays($today, -$weeks * 7), $today - 1) as $row) {
             $ts = (int) $row['TimeStamp'];
-            $v  = (float) $row['Avg'] * $scale;
+            $v  = (float) $row['Avg'];
             if ($v < 0) {
                 continue;
             }
@@ -600,6 +624,150 @@ class jniEnergyForecast extends IPSModule
             }
         }
         return $sum;
+    }
+
+    // =====================================================================================
+    // Zähler / Zählerwechsel
+    // =====================================================================================
+
+    /**
+     * Zählerwechsel aus der Konfiguration, sortiert nach Ausbaudatum (älteste zuerst).
+     * @return array<int, array{vid:int, date:int, factor:float, fill:bool, start:float}>|null  null = ungültige Zeile
+     */
+    private function ParseMeterChanges(): ?array
+    {
+        $list = json_decode($this->ReadPropertyString('MeterChanges'), true) ?: [];
+        $changes = [];
+        foreach ($list as $row) {
+            $vid  = (int) ($row['VariableID'] ?? 0);
+            $date = $this->ParseDate((string) ($row['ChangeDate'] ?? ''));
+            if ($vid <= 0 || $date === null) {
+                return null;
+            }
+            $factor = (float) ($row['Factor'] ?? 1.0);
+            $changes[] = [
+                'vid'    => $vid,
+                'date'   => $date,
+                'factor' => $factor != 0.0 ? $factor : 1.0,
+                'fill'   => (bool) ($row['FillGap'] ?? false),
+                'start'  => (float) ($row['StartReading'] ?? 0.0),
+            ];
+        }
+        usort($changes, fn($a, $b) => $a['date'] <=> $b['date']);
+        return $changes;
+    }
+
+    /** Baut die Zeitabschnitte je Zählervariable und die geschätzten Lücken für die aktuelle Berechnung */
+    private function PrepareCounter(int $ac): void
+    {
+        $this->segments = [];
+        $this->gapHours = [];
+        $changes = $this->ParseMeterChanges() ?? [];
+
+        $from = null;
+        foreach ($changes as $c) {
+            // alter Zähler: bis einschließlich Ausbautag
+            $this->segments[] = ['vid' => $c['vid'], 'factor' => $c['factor'], 'from' => $from, 'to' => $this->AddDays($c['date'], 1)];
+            // Nachfolger: ab Ausbautag (beide liefern nur in ihrer Laufzeit Zuwächse)
+            $from = $c['date'];
+        }
+        $this->segments[] = [
+            'vid'    => $this->ReadPropertyInteger('CounterVariableID'),
+            'factor' => $this->ReadPropertyFloat('ScaleFactor'),
+            'from'   => $from,
+            'to'     => null,
+        ];
+
+        foreach ($changes as $i => $c) {
+            if ($c['fill']) {
+                $this->AddGap($ac, $c, $this->segments[$i + 1]);
+            }
+        }
+    }
+
+    /** Verbrauch zwischen letztem Wert des alten und erstem Wert des neuen Zählers gleichmäßig auf Stunden verteilen */
+    private function AddGap(int $ac, array $change, array $next): void
+    {
+        $last = @AC_GetLoggedValues($ac, $change['vid'], 0, $this->AddDays($change['date'], 1) - 1, 1);
+        if (!is_array($last) || count($last) === 0) {
+            return;
+        }
+        $gapStart = (int) $last[0]['TimeStamp'];
+
+        // ersten Wert des Nachfolgers ab Ausbautag tageweise suchen (je Tag max. 10.000 Werte)
+        $first = null;
+        for ($d = 0; $d < 62 && $first === null; $d++) {
+            $ds   = $this->AddDays($change['date'], $d);
+            $rows = @AC_GetLoggedValues($ac, $next['vid'], $ds, $this->AddDays($ds, 1) - 1, 0);
+            if (is_array($rows) && count($rows) > 0) {
+                $first = end($rows);
+            }
+        }
+        if ($first === null) {
+            return;
+        }
+        $gapEnd = (int) $first['TimeStamp'];
+        $amount = ((float) $first['Value'] - $change['start']) * $next['factor'];
+        if ($gapEnd <= $gapStart || $amount <= 0) {
+            return;
+        }
+
+        $dur = $gapEnd - $gapStart;
+        for ($h = $gapStart - ($gapStart % 3600); $h < $gapEnd; $h += 3600) {
+            $a = max($h, $gapStart);
+            $b = min($h + 3600, $gapEnd);
+            if ($b > $a) {
+                $this->gapHours[$h] = ($this->gapHours[$h] ?? 0.0) + $amount * ($b - $a) / $dur;
+            }
+        }
+        $this->SendDebug('Zählerwechsel', sprintf(
+            'Lücke %s – %s: %.3f %s geschätzt',
+            date('d.m.Y H:i', $gapStart), date('d.m.Y H:i', $gapEnd), $amount, $this->ReadPropertyString('Unit')
+        ), 0);
+    }
+
+    /**
+     * Aggregierte Zuwächse über alle Zähler (inkl. Faktor und geschätzter Lücken).
+     * @param int $level 0 = Stunde, 1 = Tag
+     * @return array<int, array{TimeStamp:int, Avg:float}> neueste zuerst (wie AC_GetAggregatedValues)
+     */
+    private function CounterValues(int $level, int $start, int $end): array
+    {
+        $ac  = $this->ArchiveID();
+        $sum = [];
+        foreach ($this->segments as $s) {
+            $qs = $s['from'] === null ? $start : max($start, $s['from']);
+            $qe = $s['to'] === null ? $end : min($end, $s['to'] - 1);
+            if ($qe < $qs) {
+                continue;
+            }
+            foreach (AC_GetAggregatedValues($ac, $s['vid'], $level, $qs, $qe, 0) as $row) {
+                // erster Wert eines Zählers kommt mit Ist-Zeit (z. B. 09:18) statt Intervallbeginn -> normieren
+                $ts = $this->BucketStart($level, (int) $row['TimeStamp']);
+                $sum[$ts] = ($sum[$ts] ?? 0.0) + (float) $row['Avg'] * $s['factor'];
+            }
+        }
+        foreach ($this->gapHours as $h => $v) {
+            $key = $this->BucketStart($level, $h);
+            if ($key >= $this->BucketStart($level, $start) && $key <= $end) {
+                $sum[$key] = ($sum[$key] ?? 0.0) + $v;
+            }
+        }
+        krsort($sum);
+        $out = [];
+        foreach ($sum as $ts => $v) {
+            $out[] = ['TimeStamp' => $ts, 'Avg' => $v];
+        }
+        return $out;
+    }
+
+    /** Beginn des Aggregationsintervalls (0 = Stunde, 1 = Tag) */
+    private function BucketStart(int $level, int $ts): int
+    {
+        if ($level === 0) {
+            return mktime((int) date('G', $ts), 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts));
+        }
+        return mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts));
     }
 
     // =====================================================================================
@@ -956,13 +1124,27 @@ HTML;
             return self::STATUS_NO_COUNTER;
         }
         $ac = $this->ArchiveID();
-        if ($ac <= 0 || !AC_GetLoggingStatus($ac, $cid) || AC_GetAggregationType($ac, $cid) !== 1) {
+        if (!$this->IsArchivedCounter($ac, $cid)) {
             return self::STATUS_NOT_COUNTER;
+        }
+        $changes = $this->ParseMeterChanges();
+        if ($changes === null) {
+            return self::STATUS_BAD_CHANGE;
+        }
+        foreach ($changes as $c) {
+            if ($c['vid'] === $cid || !IPS_VariableExists($c['vid']) || !$this->IsArchivedCounter($ac, $c['vid'])) {
+                return self::STATUS_BAD_CHANGE;
+            }
         }
         if ($this->ParsePeriodStart() === null) {
             return self::STATUS_BAD_PERIOD;
         }
         return 102;
+    }
+
+    private function IsArchivedCounter(int $ac, int $vid): bool
+    {
+        return $ac > 0 && AC_GetLoggingStatus($ac, $vid) && AC_GetAggregationType($ac, $vid) === 1;
     }
 
     private function ArchiveID(): int

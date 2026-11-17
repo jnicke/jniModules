@@ -12,6 +12,23 @@
                         { "type": "ValidationTextBox", "name": "Unit", "caption": "Einheit" },
                         { "type": "NumberSpinner", "name": "ScaleFactor", "caption": "Skalierungsfaktor (z. B. 0,001 für Wh → kWh)", "digits": 4, "width": "300px" }
                     ]
+                },
+                { "type": "Label", "caption": "Zählerwechsel: frühere Zähler mit dem Tag des Ausbaus. Bis einschließlich dieses Tages zählt der alte Zähler, ab diesem Tag der Nachfolger (am Wechseltag werden beide addiert)." },
+                { "type": "Label", "caption": "„Lücke schätzen“: Verbrauch zwischen letztem Wert des alten und erstem Wert des neuen Zählers = (erster Wert − Anfangsstand) × Faktor des Nachfolgers, gleichmäßig verteilt." },
+                {
+                    "type": "List",
+                    "name": "MeterChanges",
+                    "caption": "Zählerwechsel (frühere Zähler)",
+                    "rowCount": 3,
+                    "add": true,
+                    "delete": true,
+                    "columns": [
+                        { "caption": "Alter Zähler", "name": "VariableID", "width": "320px", "add": 0, "edit": { "type": "SelectVariable" } },
+                        { "caption": "Ausbau am (TT.MM.JJJJ)", "name": "ChangeDate", "width": "170px", "add": "", "edit": { "type": "ValidationTextBox", "validate": "^\\s*\\d{1,2}\\.\\d{1,2}\\.\\d{4}\\s*$" } },
+                        { "caption": "Faktor", "name": "Factor", "width": "100px", "add": 1, "edit": { "type": "NumberSpinner", "digits": 4 } },
+                        { "caption": "Lücke schätzen", "name": "FillGap", "width": "120px", "add": false, "edit": { "type": "CheckBox" } },
+                        { "caption": "Anfangsstand Nachfolger", "name": "StartReading", "width": "auto", "add": 0, "edit": { "type": "NumberSpinner", "digits": 3 } }
+                    ]
                 }
             ]
         },
@@ -84,6 +101,7 @@
         { "code": 200, "icon": "error", "caption": "Keine Zählervariable gewählt" },
         { "code": 201, "icon": "error", "caption": "Zählervariable wird nicht als Zähler archiviert" },
         { "code": 202, "icon": "error", "caption": "Zu wenig archivierte Daten (mind. 14 Tage)" },
-        { "code": 203, "icon": "error", "caption": "Periodenbeginn ungültig (Format TT.MM.)" }
+        { "code": 203, "icon": "error", "caption": "Periodenbeginn ungültig (Format TT.MM.)" },
+        { "code": 204, "icon": "error", "caption": "Zählerwechsel ungültig (Variable fehlt / nicht als Zähler archiviert / Datum TT.MM.JJJJ)" }
     ]
 }
