@@ -1,0 +1,5 @@
+# Einheitlich LF für alle Textdateien, unabhängig von core.autocrlf
+* text=auto eol=lf
+
+# Minifizierte Bibliothek nicht anfassen
+*.min.js -text

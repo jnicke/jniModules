@@ -1,0 +1,14 @@
+{
+    "id": "{B7E4C1A2-5D3F-4E8A-9C61-2F7A8D0E4B35}",
+    "name": "jniEnergyForecast",
+    "type": 3,
+    "vendor": "jnicke",
+    "aliases": [
+        "Energie Forecast",
+        "Verbrauchsprognose"
+    ],
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "prefix": "EFC"
+}

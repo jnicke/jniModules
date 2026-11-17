@@ -1,0 +1,89 @@
+{
+    "elements": [
+        {
+            "type": "ExpansionPanel",
+            "caption": "Zähler",
+            "expanded": true,
+            "items": [
+                { "type": "SelectVariable", "name": "CounterVariableID", "caption": "Zählervariable (archiviert, Aggregation: Zähler)", "width": "500px" },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "ValidationTextBox", "name": "Unit", "caption": "Einheit" },
+                        { "type": "NumberSpinner", "name": "ScaleFactor", "caption": "Skalierungsfaktor (z. B. 0,001 für Wh → kWh)", "digits": 4, "width": "300px" }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Vertrag",
+            "expanded": true,
+            "items": [
+                { "type": "ValidationTextBox", "name": "PeriodStart", "caption": "Beginn der Abrechnungsperiode (TT.MM.)", "validate": "^\\s*\\d{1,2}\\.\\d{1,2}\\.?\\s*$" },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "PricePerUnit", "caption": "Arbeitspreis brutto", "digits": 2, "suffix": " ct" },
+                        { "type": "NumberSpinner", "name": "BasePrice", "caption": "Grundpreis brutto je Monat", "digits": 2, "suffix": " €" }
+                    ]
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "MonthlyAdvance", "caption": "Monatlicher Abschlag", "digits": 2, "suffix": " €" },
+                        { "type": "NumberSpinner", "name": "PlannedAnnual", "caption": "Vertraglicher Jahresverbrauch", "digits": 0 },
+                        { "type": "NumberSpinner", "name": "Bonus", "caption": "Bonus je Periode", "digits": 2, "suffix": " €" }
+                    ]
+                },
+                {
+                    "type": "List",
+                    "name": "ManualBookings",
+                    "caption": "Zusätzliche Zahlungen an den Versorger (+) / Erstattungen (−)",
+                    "rowCount": 4,
+                    "add": true,
+                    "delete": true,
+                    "columns": [
+                        { "caption": "Datum (TT.MM.JJJJ)", "name": "Date", "width": "160px", "add": "", "edit": { "type": "ValidationTextBox" } },
+                        { "caption": "Betrag", "name": "Amount", "width": "120px", "add": 0, "edit": { "type": "NumberSpinner", "digits": 2, "suffix": " €" } },
+                        { "caption": "Bemerkung", "name": "Note", "width": "auto", "add": "", "edit": { "type": "ValidationTextBox" } }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Berechnung",
+            "items": [
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "ProfileWeeks", "caption": "Wochen für Tages-/Wochentagsprofil", "minimum": 2, "maximum": 26 },
+                        { "type": "NumberSpinner", "name": "UpdateInterval", "caption": "Aktualisierung", "suffix": " min", "minimum": 1 }
+                    ]
+                },
+                { "type": "CheckBox", "name": "LogVariables", "caption": "Prognose-Variablen archivieren (Verlauf in IPSView)" },
+                { "type": "CheckBox", "name": "MonthVariables", "caption": "12 Monatsvariablen (Ist + Prognose) anlegen" }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Diagramme (für IPSView Web-Control / WebFront)",
+            "items": [
+                { "type": "Label", "caption": "Dashboard:  http://<Symcon-IP>:3777%HOOK%" },
+                { "type": "Label", "caption": "Einzeln:  %HOOK%?chart=today | week | months | period" },
+                { "type": "Label", "caption": "Optionen:  &theme=dark|light  &bg=<hex>|transparent  &refresh=<Sekunden>  &header=0" }
+            ]
+        }
+    ],
+    "actions": [
+        { "type": "Button", "caption": "Jetzt berechnen", "onClick": "EFC_Update($id);" }
+    ],
+    "status": [
+        { "code": 102, "icon": "active", "caption": "Aktiv" },
+        { "code": 200, "icon": "error", "caption": "Keine Zählervariable gewählt" },
+        { "code": 201, "icon": "error", "caption": "Zählervariable wird nicht als Zähler archiviert" },
+        { "code": 202, "icon": "error", "caption": "Zu wenig archivierte Daten (mind. 14 Tage)" },
+        { "code": 203, "icon": "error", "caption": "Periodenbeginn ungültig (Format TT.MM.)" }
+    ]
+}
