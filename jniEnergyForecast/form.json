@@ -163,7 +163,7 @@
             "caption": "Diagramme (für IPSView Web-Control / WebFront)",
             "items": [
                 { "type": "Label", "caption": "Dashboard:  http://<Symcon-IP>:3777%HOOK%" },
-                { "type": "Label", "caption": "Einzeln:  %HOOK%?chart=today | week | months | period | model" },
+                { "type": "Label", "caption": "Einzeln:  %HOOK%?chart=today | week | months | period | model | stats | costs" },
                 { "type": "Label", "caption": "Optionen:  &theme=dark|light  &bg=<hex>|transparent  &refresh=<Sekunden>  &header=0" }
             ]
         }

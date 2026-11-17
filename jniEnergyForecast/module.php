@@ -41,7 +41,8 @@ declare(strict_types=1);
  *
  * Ausgabe:
  *  - einfache Float-Variablen mit klassischen Profilen (IPSView-tauglich)
- *  - Diagramme (Chart.js) über WebHook /hook/efc<InstanzID>?chart=dashboard|today|week|months|period|model
+ *  - Diagramme (Chart.js) und Tabellen über WebHook
+ *    /hook/efc<InstanzID>?chart=dashboard|today|week|months|period|model|stats|costs
  *    Parameter: theme=dark|light, bg=<hex>|transparent, refresh=<Sekunden>, header=0|1
  */
 class jniEnergyForecast extends IPSModule
@@ -597,6 +598,14 @@ class jniEnergyForecast extends IPSModule
         foreach ($days as $i => $r) {
             $weights[$i] = $usePrev ? ($r['prev'] ?? $prevMean) : 1.0;
         }
+        // über ±3 Tage glätten, damit einzelne Ausreißertage im Vorjahr den Tages-/Wochenplan nicht verzerren
+        if ($usePrev) {
+            $raw = $weights;
+            foreach ($raw as $i => $v) {
+                $win = array_slice($raw, max(0, $i - 3), min($i, 3) + 1 + min(3, $nDays - 1 - $i));
+                $weights[$i] = array_sum($win) / count($win);
+            }
+        }
         $wSum = array_sum($weights);
         // Gas: vertraglicher Jahresverbrauch in kWh -> Zählereinheit
         $planned = $this->ReadPropertyFloat('PlannedAnnual') / $kf;
@@ -762,6 +771,102 @@ class jniEnergyForecast extends IPSModule
         $nextCost    = 12 * $base + $nextCons * $price;
         $nextAdvance = ceil($nextCost / 12);
 
+        // ---------- Tabelle Betrachtungszeitraum ----------
+        $dayIdx = [];
+        foreach ($days as $i => $r) {
+            $dayIdx[date('Y-m-d', $r['ts'])] = $i;
+        }
+        $planOf = function (int $from, int $to) use ($dayIdx, $weights, $wSum, $planned): ?float {
+            if ($planned <= 0 || $wSum <= 0) {
+                return null;
+            }
+            $s = 0.0;
+            for ($ts = $from; $ts <= $to; $ts = $this->AddDays($ts, 1)) {
+                $i = $dayIdx[date('Y-m-d', $ts)] ?? null;
+                if ($i !== null) {
+                    $s += $planned * $weights[$i] / $wSum;
+                }
+            }
+            return $s;
+        };
+        $r2 = fn(?float $v) => $v === null ? null : round($v, 2);
+        $sunday   = $this->AddDays($monday, 6);
+        $monthEnd = mktime(0, 0, 0, (int) date('n', $today) + 1, 0, (int) date('Y', $today));
+        $weekTotal = 0.0;
+        foreach ($week['act'] as $i => $a) {
+            $weekTotal += (float) ($week['fc'][$i] ?? $a ?? 0.0);
+        }
+        $wdKnown   = array_filter($wdMean, fn($v) => $v !== null);
+        $prevTotal = count($prevVals) >= $nDays * 0.9 ? array_sum($prevVals) : null;
+        $stats = [
+            [
+                'key' => 'today', 'label' => 'Heute', 'range' => self::WEEKDAY_LONG[$wdToday] . ', ' . date('d.m.Y', $today),
+                'act' => $r2($todayActual), 'fc' => $r2($todayForecast), 'plan' => $r2($planOf($today, $today)),
+                'cmp' => $profileDay > 0 ? $r2($profileDay) : null, 'cmpLabel' => 'Ø ' . self::WEEKDAY_LONG[$wdToday],
+            ],
+            [
+                'key' => 'week', 'label' => 'Woche', 'range' => 'KW ' . date('W', $today) . ' · ' . date('d.m.', $monday) . ' – ' . date('d.m.', $sunday),
+                'act' => $r2($weekActual), 'fc' => $r2($weekTotal), 'plan' => $r2($planOf($monday, $sunday)),
+                'cmp' => count($wdKnown) === 7 ? $r2(array_sum($wdKnown)) : null, 'cmpLabel' => 'Ø ' . $weeks . ' Wochen',
+            ],
+            [
+                'key' => 'month', 'label' => 'Monat', 'range' => self::MONTH_NAMES[(int) date('n', $today)] . ' ' . date('Y', $today)
+                    . ' · ' . date('d.m.', mktime(0, 0, 0, (int) date('n', $today), 1, (int) date('Y', $today))) . ' – ' . date('d.m.', $monthEnd),
+                'act' => $r2($monthActual), 'fc' => $r2($monthForecast),
+                'plan' => $curMi !== null ? $months['plan'][$curMi] : null,
+                'cmp' => $curMi !== null ? $months['prev'][$curMi] : null, 'cmpLabel' => 'Vorjahresmonat',
+            ],
+            [
+                'key' => 'period', 'label' => 'Periode', 'range' => date('d.m.Y', $pStart) . ' – ' . date('d.m.Y', $pEnd),
+                'act' => $r2($periodActual), 'fc' => $r2($periodForecast), 'plan' => $planned > 0 ? $r2($planned) : null,
+                'cmp' => $r2($prevTotal), 'cmpLabel' => 'Vorperiode',
+            ],
+        ];
+
+        // ---------- Tabelle Vertragskosten (je Monat der Periode) ----------
+        $bookMonth = $this->BookingsByMonth($pStart, $pEnd);
+        $costRows  = [];
+        $cumSaldo  = 0.0;
+        $sumRow    = ['cons' => 0.0, 'cost' => 0.0, 'adv' => 0.0, 'book' => 0.0];
+        foreach ($months['keys'] as $i => $ym) {
+            $a     = (float) ($months['act'][$i] ?? 0.0);
+            $f     = (float) ($months['fc'][$i] ?? 0.0);
+            $cons  = $a + $f;
+            $work  = $cons * $price;
+            $cost  = $base + $work;
+            $book  = $bookMonth[$ym] ?? 0.0;
+            $saldo = $advance + $book - $cost;
+            $cumSaldo += $saldo;
+            $mStart = strtotime($ym . '-01');
+            $costRows[] = [
+                'label'   => $months['labels'][$i],
+                'state'   => $ym === date('Y-m', $today) ? 'cur' : ($mStart > $today ? 'fut' : 'past'),
+                'consAct' => round($a, 1),
+                'consFc'  => round($f, 1),
+                'cons'    => round($cons, 1),
+                'base'    => round($base, 2),
+                'work'    => round($work, 2),
+                'cost'    => round($cost, 2),
+                'adv'     => round($advance, 2),
+                'book'    => round($book, 2),
+                'saldo'   => round($saldo, 2),
+                'cum'     => round($cumSaldo, 2),
+            ];
+            $sumRow['cons'] += $cons;
+            $sumRow['cost'] += $cost;
+            $sumRow['adv']  += $advance;
+            $sumRow['book'] += $book;
+        }
+        $costs = [
+            'rows'     => $costRows,
+            'sum'      => array_map(fn($v) => round($v, 2), $sumRow),
+            'bonus'    => round($bonus, 2),
+            'balance'  => round($cumSaldo + $bonus, 2),
+            'advance'  => round($advance, 2),
+            'priceCt'  => $this->ReadPropertyFloat('PricePerUnit'),
+            'next'     => ['cons' => round($nextCons, 1), 'cost' => round($nextCost, 2), 'advance' => $nextAdvance],
+        ];
+
         // ---------- Witterungs-Kennzahlen ----------
         $weatherData = $weatherOn ? $this->WeatherKpis($pStart, $today, $kf) : null;
 
@@ -814,6 +919,8 @@ class jniEnergyForecast extends IPSModule
             'week'    => $week,
             'months'  => $months,
             'cum'     => $cum,
+            'stats'   => $stats,
+            'costs'   => $costs,
             'weather' => $weatherData,
         ];
     }
@@ -885,6 +992,21 @@ class jniEnergyForecast extends IPSModule
             }
         }
         return $sum;
+    }
+
+    /** Manuelle Buchungen je Monat ('Y-m' => Summe) innerhalb der Periode */
+    private function BookingsByMonth(int $from, int $to): array
+    {
+        $out = [];
+        $list = json_decode($this->ReadPropertyString('ManualBookings'), true) ?: [];
+        foreach ($list as $b) {
+            $ts = $this->ParseDate((string) ($b['Date'] ?? ''));
+            if ($ts !== null && $ts >= $from && $ts <= $to) {
+                $key = date('Y-m', $ts);
+                $out[$key] = ($out[$key] ?? 0.0) + (float) ($b['Amount'] ?? 0);
+            }
+        }
+        return $out;
     }
 
     // =====================================================================================
@@ -1560,7 +1682,7 @@ class jniEnergyForecast extends IPSModule
         }
 
         $chart = preg_replace('/[^a-z]/', '', strtolower((string) ($_GET['chart'] ?? 'dashboard')));
-        if (!in_array($chart, ['dashboard', 'today', 'week', 'months', 'period', 'model'], true)) {
+        if (!in_array($chart, ['dashboard', 'today', 'week', 'months', 'period', 'model', 'stats', 'costs'], true)) {
             $chart = 'dashboard';
         }
         $theme   = (($_GET['theme'] ?? 'dark') === 'light') ? 'light' : 'dark';
@@ -1586,6 +1708,7 @@ class jniEnergyForecast extends IPSModule
                 'avg' => '#e9ecef', 'prev' => '#f4a261', 'plan' => '#8b949e', 'range' => 'rgba(255,255,255,0.09)',
                 'pos' => '#56d364', 'neg' => '#f85149', 'posA' => 'rgba(86,211,100,0.16)', 'negA' => 'rgba(248,81,73,0.16)',
                 'temp' => '#c792ea', 'tempA' => 'rgba(199,146,234,0.55)', 'dotA' => 'rgba(78,168,222,0.55)', 'dotB' => 'rgba(244,162,97,0.60)',
+                'hl' => 'rgba(78,168,222,0.08)',
             ],
             'light' => [
                 'bg' => '#f6f8fa', 'card' => '#ffffff', 'border' => 'rgba(0,0,0,0.08)',
@@ -1594,6 +1717,7 @@ class jniEnergyForecast extends IPSModule
                 'avg' => '#343a40', 'prev' => '#e76f51', 'plan' => '#6e7781', 'range' => 'rgba(0,0,0,0.07)',
                 'pos' => '#1a7f37', 'neg' => '#cf222e', 'posA' => 'rgba(26,127,55,0.14)', 'negA' => 'rgba(207,34,46,0.14)',
                 'temp' => '#8250df', 'tempA' => 'rgba(130,80,223,0.50)', 'dotA' => 'rgba(31,120,180,0.50)', 'dotB' => 'rgba(231,111,81,0.55)',
+                'hl' => 'rgba(31,120,180,0.06)',
             ],
         ];
         $t = $themes[$theme];
@@ -1615,7 +1739,8 @@ class jniEnergyForecast extends IPSModule
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Energie Forecast</title>
 <style>
-  :root { --bg:__BG__; --card:__CARD__; --border:__BORDER__; --text:__TEXT__; --muted:__MUTED__; --pos:__POS__; --neg:__NEG__; }
+  :root { --bg:__BG__; --card:__CARD__; --border:__BORDER__; --text:__TEXT__; --muted:__MUTED__; --pos:__POS__; --neg:__NEG__;
+          --ist:__IST__; --hatch:__HATCH__; --fc:__FC__; --plan:__PLAN__; --prev:__PREV__; --hl:__HL__; }
   * { box-sizing: border-box; }
   html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
                font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -1636,6 +1761,36 @@ class jniEnergyForecast extends IPSModule
   .foot { color:var(--muted); font-size:11px; text-align:right; margin-top:8px; }
   .pos { color:var(--pos); } .neg { color:var(--neg); }
   .err { padding:20px; color:var(--neg); }
+  .tabs { display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(540px, 1fr)); margin-bottom:10px; }
+  .tab { overflow:auto; }
+  table.t { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  .t th { color:var(--muted); font-weight:500; font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+          text-align:right; padding:4px 6px 6px; border-bottom:1px solid var(--border); white-space:nowrap; }
+  .t td { text-align:right; padding:5px 6px; border-bottom:1px solid var(--border); white-space:nowrap; vertical-align:top; }
+  .t th:first-child, .t td:first-child { text-align:left; padding-left:4px; }
+  .t tbody tr:last-child td { border-bottom:none; }
+  .t tr.cur td { background:var(--hl); }
+  .t tr.fut td { color:var(--muted); }
+  .t tr.fut td.pos, .t tr.fut td.neg { opacity:.8; }
+  .t tfoot td { border-bottom:none; }
+  .t tr.sum td { border-top:2px solid var(--border); font-weight:600; padding-top:8px; }
+  .t tr.nxt td { border-top:1px dashed var(--border); padding-top:8px; }
+  .t .rl { font-weight:600; }
+  .t .s2 { color:var(--muted); font-size:11px; font-weight:400; }
+  .t .mut { color:var(--muted); }
+  .t .tag { display:inline-block; margin-left:6px; padding:0 6px; border-radius:8px; font-size:10px; line-height:16px;
+            background:var(--border); color:var(--muted); vertical-align:1px; }
+  .t .barc { width:18%; min-width:70px; vertical-align:middle; }
+  .bar { position:relative; height:8px; border-radius:4px; background:var(--border); }
+  .bar i { position:absolute; top:0; bottom:0; }
+  .bar i.a { left:0; background:var(--ist); border-radius:4px 0 0 4px; }
+  .bar i.f { background:repeating-linear-gradient(135deg, var(--hatch) 0 1.5px, var(--fc) 1.5px 5px); }
+  .bar b { position:absolute; top:-3px; bottom:-3px; width:2px; margin-left:-1px; border-radius:1px; }
+  .bar b.mp { background:var(--plan); }
+  .bar b.mc { background:var(--prev); }
+  .lg { color:var(--muted); font-size:11px; margin-top:8px; display:flex; gap:14px; flex-wrap:wrap; justify-content:center; }
+  .lg span::before { content:''; display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; background:var(--c); }
+  .lg span.ln::before { width:3px; border-radius:1px; }
 </style>
 <script src="__HOOK__?lib=chartjs"></script>
 <script>if(!window.Chart){document.write('<scr'+'ipt src="__CDN__"></scr'+'ipt>');}</script>
@@ -1810,6 +1965,77 @@ if (!D) {
         };
       }
     },
+    stats: {
+      title: 'Betrachtungszeitraum',
+      sub: () => `Prognose bis Zeitraumende ggü. Plan und Vergleich · ${U}`,
+      html: () => {
+        const dev = (a, b) => (a == null || b == null || b <= 0) ? null : (a / b - 1) * 100;
+        const devTd = v => v == null ? '<td class="mut">–</td>' : `<td class="${v > 0 ? 'neg' : 'pos'}">${sgn(v)} %</td>`;
+        const rows = D.stats.map(r => {
+          const max = Math.max(r.fc || 0, r.plan || 0, r.cmp || 0) || 1;
+          const a = Math.min(100, (r.act || 0) / max * 100);
+          const f = Math.max(0, Math.min(100, (r.fc || 0) / max * 100) - a);
+          const mark = (v, cls, tip) => v == null ? '' : `<b class="${cls}" style="left:${Math.min(100, v / max * 100)}%" title="${tip}: ${nf(v, 1)} ${U}"></b>`;
+          let range = r.range;
+          if (r.key === 'period' && W && W.adjDeviation != null) range += ` · witterungsbereinigt ggü. Vj ${sgn(W.adjDeviation)} %`;
+          return '<tr>' +
+            `<td><div class="rl">${r.label}</div><div class="s2">${range}</div></td>` +
+            `<td>${nf(r.act, 1)}</td>` +
+            `<td><b>${nf(r.fc, 1)}</b>${D.kwhFactor !== 1 ? `<div class="s2">${nf(r.fc * D.kwhFactor, 0)} kWh</div>` : ''}</td>` +
+            `<td class="barc"><div class="bar"><i class="a" style="width:${a}%"></i><i class="f" style="left:${a}%;width:${f}%"></i>` +
+              `${mark(r.plan, 'mp', 'Plan')}${mark(r.cmp, 'mc', r.cmpLabel)}</div></td>` +
+            `<td>${nf(r.plan, 1)}</td>${devTd(dev(r.fc, r.plan))}` +
+            `<td>${nf(r.cmp, 1)}<div class="s2">${r.cmpLabel}</div></td>${devTd(dev(r.fc, r.cmp))}` +
+          '</tr>';
+        }).join('');
+        return '<table class="t"><thead><tr><th>Zeitraum</th><th>Ist bisher</th><th>Prognose</th><th class="barc"></th>' +
+               '<th>Plan</th><th>Δ Plan</th><th>Vergleich</th><th>Δ Vergl.</th></tr></thead>' +
+               `<tbody>${rows}</tbody></table>` +
+               '<div class="lg"><span style="--c:var(--ist)">Ist</span><span style="--c:var(--hatch)">Prognose</span>' +
+               '<span class="ln" style="--c:var(--plan)">Plan</span><span class="ln" style="--c:var(--prev)">Vergleich</span></div>';
+      }
+    },
+    costs: {
+      title: 'Vertragskosten',
+      sub: () => `${D.periodLabel} · Arbeitspreis ${nf(D.costs.priceCt, 2)} ct/${D.perUnit} · Grundpreis ${eur(D.basePrice)}/Monat · Abschlag ${eur(D.costs.advance)}/Monat`,
+      html: () => {
+        const C = D.costs;
+        const kwh = v => D.kwhFactor !== 1 ? `<div class="s2">${nf(v * D.kwhFactor, 0)} kWh</div>` : '';
+        const sTd = v => `<td class="${v >= 0 ? 'pos' : 'neg'}">${eur(v)}</td>`;
+        const tag = { past: '', cur: '<span class="tag">Ist + Prognose</span>', fut: '<span class="tag">Prognose</span>' };
+        const hasBook = C.rows.some(r => r.book);
+        const rows = C.rows.map(r => `<tr class="${r.state}">` +
+            `<td>${r.label}${tag[r.state]}</td>` +
+            `<td title="Ist ${nf(r.consAct, 1)} ${U} + Prognose ${nf(r.consFc, 1)} ${U}">${nf(r.cons, 1)} ${U}${kwh(r.cons)}</td>` +
+            `<td title="Grundpreis ${eur(r.base)} + Arbeitspreis ${eur(r.work)}">${eur(r.cost)}</td>` +
+            `<td>${eur(r.adv)}</td>` +
+            (hasBook ? `<td class="${r.book ? '' : 'mut'}">${r.book ? eur(r.book) : '–'}</td>` : '') +
+            sTd(r.saldo) + sTd(r.cum) +
+          '</tr>').join('');
+        const N = C.next;
+        const dAdv = N.advance - C.advance;
+        const bal = C.balance;
+        const foot =
+          '<tr class="sum">' +
+            '<td>Gesamt</td>' +
+            `<td>${nf(C.sum.cons, 1)} ${U}${kwh(C.sum.cons)}</td>` +
+            `<td>${eur(C.sum.cost)}</td><td>${eur(C.sum.adv)}</td>` +
+            (hasBook ? `<td class="${C.sum.book ? '' : 'mut'}">${C.sum.book ? eur(C.sum.book) : '–'}</td>` : '') +
+            `<td colspan="2" class="${bal >= 0 ? 'pos' : 'neg'}">${eur(bal)}` +
+              `<div class="s2">${bal >= 0 ? 'Guthaben' : 'Nachzahlung'}${C.bonus ? ' inkl. Bonus ' + eur(C.bonus) : ''}</div></td>` +
+          '</tr>' +
+          '<tr class="nxt">' +
+            `<td>Folgeperiode<div class="s2">${D.nextLabel}</div></td>` +
+            `<td>${nf(N.cons, 0)} ${U}${kwh(N.cons)}</td>` +
+            `<td>${eur(N.cost)}</td>` +
+            `<td><b>${eur(N.advance)}</b><div class="s2">empfohlen (${dAdv >= 0 ? '+' : ''}${nf(dAdv, 0)} €)</div></td>` +
+            `<td colspan="${hasBook ? 3 : 2}" class="mut">Prognose aus ${hasModel ? 'Heizgradtag-Modell' : 'Vorjahresverlauf'}</td>` +
+          '</tr>';
+        return '<table class="t"><thead><tr><th>Monat</th><th>Verbrauch</th><th>Kosten</th><th>Abschlag</th>' +
+               (hasBook ? '<th>Buchungen</th>' : '') + '<th>Saldo</th><th>Saldo kum.</th></tr></thead>' +
+               `<tbody>${rows}</tbody><tfoot>${foot}</tfoot></table>`;
+      }
+    },
     model: {
       title: 'Heizgradtag-Modell',
       sub: () => {
@@ -1856,7 +2082,8 @@ if (!D) {
   const card = (key, single) => {
     const c = charts[key];
     const head = HEADER ? `<h3>${c.title}</h3><div class="sub">${c.sub()}</div>` : '';
-    return `<div class="card">${head}<div class="chart"><canvas id="c_${key}"></canvas></div></div>`;
+    const body = c.html ? `<div class="tab">${c.html()}</div>` : `<div class="chart"><canvas id="c_${key}"></canvas></div>`;
+    return `<div class="card">${head}${body}</div>`;
   };
   const kpi = (l, v, s = '', cls = '') => `<div class="kpi"><div class="l">${l}</div><div class="v ${cls}">${v}</div><div class="s">${s}</div></div>`;
 
@@ -1898,7 +2125,7 @@ if (!D) {
     root.className = 'single';
     root.innerHTML = card(VIEW, true);
   }
-  keys.forEach(k => new Chart(document.getElementById('c_' + k), charts[k].cfg()));
+  keys.filter(k => charts[k].cfg).forEach(k => new Chart(document.getElementById('c_' + k), charts[k].cfg()));
 }
 </script>
 </body>
@@ -1913,6 +2140,12 @@ HTML;
             '__MUTED__'   => $t['muted'],
             '__POS__'     => $t['pos'],
             '__NEG__'     => $t['neg'],
+            '__IST__'     => $t['ist'],
+            '__HATCH__'   => $t['hatch'],
+            '__FC__'      => $t['fc'],
+            '__PLAN__'    => $t['plan'],
+            '__PREV__'    => $t['prev'],
+            '__HL__'      => $t['hl'],
             '__HOOK__'    => $hook,
             '__CDN__'     => self::CHARTJS_URL,
             '__DATA__'    => $json === false ? 'null' : $json,

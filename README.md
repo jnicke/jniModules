@@ -126,6 +126,8 @@ Das Modul stellt die Diagramme über einen WebHook bereit (z. B. für das Web-Co
 
 ```
 http://<Symcon-IP>:3777/hook/efc<InstanzID>                 Dashboard (Kennzahlen + Diagramme)
+http://<Symcon-IP>:3777/hook/efc<InstanzID>?chart=stats     Tabelle Betrachtungszeitraum: Heute/Woche/Monat/Periode – Ist, Prognose, Plan, Vergleich
+                                                ?chart=costs     Tabelle Vertragskosten: je Monat Verbrauch, Kosten, Abschlag, Saldo; Folgeperiode
 http://<Symcon-IP>:3777/hook/efc<InstanzID>?chart=today     Heute: Stundenwerte, Ø Wochentag, gestern, Außentemperatur
                                                 ?chart=week      Woche: Ist/Prognose, Spanne + Ø der letzten n Wochen, Ø Temperatur
                                                 ?chart=months    Monate: Ist/Prognose, Vorjahr, Plan, Heizgradtage, Kosten im Tooltip
@@ -153,3 +155,4 @@ EFC_GetModelInfo(int $InstanceID);      // Heizgradtag-Modell als Text (auch But
 - Witterungsbereinigte Prognose mit Heizgradtagen (Regression, optional Werktag/Wochenende+Feiertag, Open-Meteo)
 - Kennzahlen: witterungsbereinigt ggü. Vorjahr, Verbrauch je Heizgradtag, R²
 - Diagramme: Außentemperatur, Heizgradtage, neues Modell-Diagramm
+- Tabellen „Betrachtungszeitraum“ und „Vertragskosten“ (wie im RS-Original, neu gestaltet), Planverteilung über ±3 Tage geglättet
