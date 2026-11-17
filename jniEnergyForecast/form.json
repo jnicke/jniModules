@@ -9,7 +9,16 @@
                 {
                     "type": "RowLayout",
                     "items": [
-                        { "type": "ValidationTextBox", "name": "Unit", "caption": "Einheit" },
+                        {
+                            "type": "Select",
+                            "name": "MeterType",
+                            "caption": "Zählerart",
+                            "options": [
+                                { "caption": "Strom / allgemein", "value": 0 },
+                                { "caption": "Gas (m³ → kWh)", "value": 1 }
+                            ]
+                        },
+                        { "type": "ValidationTextBox", "name": "Unit", "caption": "Einheit (Gas: m³)" },
                         { "type": "NumberSpinner", "name": "ScaleFactor", "caption": "Skalierungsfaktor (z. B. 0,001 für Wh → kWh)", "digits": 4, "width": "300px" }
                     ]
                 },
@@ -34,6 +43,20 @@
         },
         {
             "type": "ExpansionPanel",
+            "caption": "Gas (nur bei Zählerart Gas)",
+            "items": [
+                { "type": "Label", "caption": "kWh = m³ × Brennwert × Zustandszahl – beide Werte stehen auf der Gasrechnung. Arbeitspreis und vertraglicher Jahresverbrauch werden dann in kWh angegeben." },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "CalorificValue", "caption": "Brennwert", "digits": 3, "suffix": " kWh/m³" },
+                        { "type": "NumberSpinner", "name": "ZNumber", "caption": "Zustandszahl", "digits": 4 }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
             "caption": "Vertrag",
             "expanded": true,
             "items": [
@@ -41,7 +64,7 @@
                 {
                     "type": "RowLayout",
                     "items": [
-                        { "type": "NumberSpinner", "name": "PricePerUnit", "caption": "Arbeitspreis brutto", "digits": 2, "suffix": " ct" },
+                        { "type": "NumberSpinner", "name": "PricePerUnit", "caption": "Arbeitspreis brutto (Gas: je kWh)", "digits": 2, "suffix": " ct" },
                         { "type": "NumberSpinner", "name": "BasePrice", "caption": "Grundpreis brutto je Monat", "digits": 2, "suffix": " €" }
                     ]
                 },
@@ -49,7 +72,7 @@
                     "type": "RowLayout",
                     "items": [
                         { "type": "NumberSpinner", "name": "MonthlyAdvance", "caption": "Monatlicher Abschlag", "digits": 2, "suffix": " €" },
-                        { "type": "NumberSpinner", "name": "PlannedAnnual", "caption": "Vertraglicher Jahresverbrauch", "digits": 0 },
+                        { "type": "NumberSpinner", "name": "PlannedAnnual", "caption": "Vertraglicher Jahresverbrauch (Gas: kWh)", "digits": 0 },
                         { "type": "NumberSpinner", "name": "Bonus", "caption": "Bonus je Periode", "digits": 2, "suffix": " €" }
                     ]
                 },
@@ -64,6 +87,58 @@
                         { "caption": "Datum (TT.MM.JJJJ)", "name": "Date", "width": "160px", "add": "", "edit": { "type": "ValidationTextBox" } },
                         { "caption": "Betrag", "name": "Amount", "width": "120px", "add": 0, "edit": { "type": "NumberSpinner", "digits": 2, "suffix": " €" } },
                         { "caption": "Bemerkung", "name": "Note", "width": "auto", "add": "", "edit": { "type": "ValidationTextBox" } }
+                    ]
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Witterung / Heizgradtage (optional)",
+            "items": [
+                { "type": "Label", "caption": "Mit einer archivierten Außentemperatur wird witterungsbereinigt prognostiziert: Tagesverbrauch = Grundlast + Faktor × Heizgradtage (HGT = Heizgrenze − Tagesmittel, mind. 0), Regression über die letzten 365 Tage." },
+                { "type": "SelectVariable", "name": "TemperatureVariableID", "caption": "Außentemperatur (archiviert, leer = aus)", "width": "500px" },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "HeatingLimit", "caption": "Heizgrenze", "digits": 1, "suffix": " °C" },
+                        { "type": "ValidationTextBox", "name": "TemperatureValidFrom", "caption": "Temperatur gültig ab (TT.MM.JJJJ, leer = alles)", "width": "320px" }
+                    ]
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "CheckBox", "name": "SplitDayType", "caption": "Werktage und Wochenende/Feiertage getrennt rechnen" },
+                        {
+                            "type": "Select",
+                            "name": "HolidayState",
+                            "caption": "Feiertage (Bundesland)",
+                            "options": [
+                                { "caption": "Baden-Württemberg", "value": "BW" },
+                                { "caption": "Bayern", "value": "BY" },
+                                { "caption": "Berlin", "value": "BE" },
+                                { "caption": "Brandenburg", "value": "BB" },
+                                { "caption": "Bremen", "value": "HB" },
+                                { "caption": "Hamburg", "value": "HH" },
+                                { "caption": "Hessen", "value": "HE" },
+                                { "caption": "Mecklenburg-Vorpommern", "value": "MV" },
+                                { "caption": "Niedersachsen", "value": "NI" },
+                                { "caption": "Nordrhein-Westfalen", "value": "NW" },
+                                { "caption": "Rheinland-Pfalz", "value": "RP" },
+                                { "caption": "Saarland", "value": "SL" },
+                                { "caption": "Sachsen", "value": "SN" },
+                                { "caption": "Sachsen-Anhalt", "value": "ST" },
+                                { "caption": "Schleswig-Holstein", "value": "SH" },
+                                { "caption": "Thüringen", "value": "TH" }
+                            ]
+                        }
+                    ]
+                },
+                { "type": "CheckBox", "name": "UseOpenMeteo", "caption": "Temperatur der nächsten 7 Tage von Open-Meteo holen (danach Mittel der Vorjahre)" },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        { "type": "NumberSpinner", "name": "Latitude", "caption": "Breite (0 = Symcon-Standort)", "digits": 4 },
+                        { "type": "NumberSpinner", "name": "Longitude", "caption": "Länge (0 = Symcon-Standort)", "digits": 4 }
                     ]
                 }
             ]
@@ -88,13 +163,14 @@
             "caption": "Diagramme (für IPSView Web-Control / WebFront)",
             "items": [
                 { "type": "Label", "caption": "Dashboard:  http://<Symcon-IP>:3777%HOOK%" },
-                { "type": "Label", "caption": "Einzeln:  %HOOK%?chart=today | week | months | period" },
+                { "type": "Label", "caption": "Einzeln:  %HOOK%?chart=today | week | months | period | model" },
                 { "type": "Label", "caption": "Optionen:  &theme=dark|light  &bg=<hex>|transparent  &refresh=<Sekunden>  &header=0" }
             ]
         }
     ],
     "actions": [
-        { "type": "Button", "caption": "Jetzt berechnen", "onClick": "EFC_Update($id);" }
+        { "type": "Button", "caption": "Jetzt berechnen", "onClick": "EFC_Update($id);" },
+        { "type": "Button", "caption": "Heizgradtag-Modell anzeigen", "onClick": "echo EFC_GetModelInfo($id);" }
     ],
     "status": [
         { "code": 102, "icon": "active", "caption": "Aktiv" },
@@ -102,6 +178,9 @@
         { "code": 201, "icon": "error", "caption": "Zählervariable wird nicht als Zähler archiviert" },
         { "code": 202, "icon": "error", "caption": "Zu wenig archivierte Daten (mind. 14 Tage)" },
         { "code": 203, "icon": "error", "caption": "Periodenbeginn ungültig (Format TT.MM.)" },
-        { "code": 204, "icon": "error", "caption": "Zählerwechsel ungültig (Variable fehlt / nicht als Zähler archiviert / Datum TT.MM.JJJJ)" }
+        { "code": 204, "icon": "error", "caption": "Zählerwechsel ungültig (Variable fehlt / nicht als Zähler archiviert / Datum TT.MM.JJJJ)" },
+        { "code": 205, "icon": "error", "caption": "Außentemperatur fehlt oder wird nicht archiviert" },
+        { "code": 206, "icon": "error", "caption": "„Temperatur gültig ab“ ungültig (Format TT.MM.JJJJ)" },
+        { "code": 207, "icon": "error", "caption": "Gas: Brennwert und Zustandszahl müssen größer 0 sein" }
     ]
 }

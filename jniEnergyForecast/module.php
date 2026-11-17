@@ -10,13 +10,27 @@ declare(strict_types=1);
  * (https://www.raketenschnecke.net/rs-projekte/rs-ips-energy-forecast/) – vielen Dank!
  * Dies ist eine eigenständige Neuimplementierung ohne Code aus dem Original.
  *
- * Prognose-Logik:
+ * Prognose-Logik (Standard):
  *  - Heute:        Ist bis jetzt + Stundenprofil (gleicher Wochentag, letzte n Wochen) für den Rest des Tages
  *  - Folgetage:    7-Tage-Mittel um den gleichen Kalendertag 1..3 Jahre zurück
  *                  x Niveaufaktor (letzte 28 Tage ggü. gleichem Zeitraum im Vergleichsjahr, begrenzt 0,75..1,25)
  *                  x Wochentagsfaktor (aus den letzten n Wochen)
  *                  Fallback ohne Historie: Wochentags-Median der letzten n Wochen
  *  - Plan:         Planverbrauch saisonal verteilt nach dem Verlauf der Vorperiode
+ *
+ * Witterungsbereinigte Prognose (optional, sobald eine archivierte Außentemperatur gewählt ist):
+ *  - Heizgradtage (HGT) = max(0, Heizgrenze − Tagesmittel der Außentemperatur), Heizgrenze Standard 15 °C
+ *  - Tagesverbrauch = Grundlast + Faktor × HGT, per linearer Regression aus den letzten 365 Tagen
+ *    (nur Heiztage mit HGT ≥ 1 und Verbrauch > 0, ein Durchlauf Ausreißer-Bereinigung bei 2,5 σ)
+ *  - optional getrennt nach Werktag und Wochenende/Feiertag (Feiertage je Bundesland)
+ *  - Tage ohne Heizbedarf (HGT = 0): Median der Sommertage (Warmwasser / Heizung aus)
+ *  - Temperatur der nächsten Tage aus Open-Meteo (falls aktiviert), danach Mittel der Vorjahre
+ *  - Kennzahlen: witterungsbereinigter Verbrauch ggü. Vorjahr, Verbrauch je Heizgradtag, Modellgüte R²
+ *
+ * Gas:
+ *  - Zähler in m³, Umrechnung in kWh = m³ × Brennwert × Zustandszahl (Werte von der Gasrechnung)
+ *  - Arbeitspreis und vertraglicher Jahresverbrauch in kWh, Anzeige in m³ und kWh
+ *  - "Grundlast" als Verbrauch je Tag (statt W)
  *
  * Zählerwechsel:
  *  - Frühere Zähler werden mit Ausbautag und eigenem Faktor angegeben. Bis einschließlich Ausbautag zählt der
@@ -27,27 +41,38 @@ declare(strict_types=1);
  *
  * Ausgabe:
  *  - einfache Float-Variablen mit klassischen Profilen (IPSView-tauglich)
- *  - Diagramme (Chart.js) über WebHook /hook/efc<InstanzID>?chart=dashboard|today|week|months|period
+ *  - Diagramme (Chart.js) über WebHook /hook/efc<InstanzID>?chart=dashboard|today|week|months|period|model
  *    Parameter: theme=dark|light, bg=<hex>|transparent, refresh=<Sekunden>, header=0|1
  */
 class jniEnergyForecast extends IPSModule
 {
-    private const ARCHIVE_GUID = '{43192F0B-135B-4CE7-A0A7-1475603F3060}';
-    private const WEBHOOK_GUID = '{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}';
-    private const CHARTJS_URL  = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    private const ARCHIVE_GUID  = '{43192F0B-135B-4CE7-A0A7-1475603F3060}';
+    private const WEBHOOK_GUID  = '{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}';
+    private const LOCATION_GUID = '{45E97A63-F870-408A-B259-2933F7EABF74}';
+    private const CHARTJS_URL   = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js';
+    private const OPENMETEO_URL = 'https://api.open-meteo.com/v1/forecast';
 
-    private const STATUS_NO_COUNTER   = 200;
-    private const STATUS_NOT_COUNTER  = 201;
-    private const STATUS_TOO_FEW_DATA = 202;
-    private const STATUS_BAD_PERIOD   = 203;
-    private const STATUS_BAD_CHANGE   = 204;
+    private const STATUS_NO_COUNTER     = 200;
+    private const STATUS_NOT_COUNTER    = 201;
+    private const STATUS_TOO_FEW_DATA   = 202;
+    private const STATUS_BAD_PERIOD     = 203;
+    private const STATUS_BAD_CHANGE     = 204;
+    private const STATUS_BAD_TEMP       = 205;
+    private const STATUS_BAD_TEMP_FROM  = 206;
+    private const STATUS_BAD_GAS        = 207;
+
+    private const METER_DEFAULT = 0;
+    private const METER_GAS     = 1;
 
     private const MONTH_NAMES   = [1 => 'Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
     private const WEEKDAY_NAMES = [1 => 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
     private const WEEKDAY_LONG  = [1 => 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag', 'Sonntag'];
 
     /** Variablen, die bei aktivierter Option archiviert werden (für Verlaufsdiagramme in IPSView) */
-    private const LOGGED_IDENTS = ['TodayForecast', 'PeriodActual', 'PeriodForecast', 'PeriodBalance', 'BaseLoad'];
+    private const LOGGED_IDENTS = [
+        'TodayForecast', 'PeriodActual', 'PeriodForecast', 'PeriodBalance', 'BaseLoad', 'BaseLoadDay',
+        'HddYesterday', 'WeatherAdjDeviation', 'PerHdd', 'PerHdd30',
+    ];
 
     // Laufzeit-Caches während einer Berechnung
     private array $daily = [];
@@ -57,26 +82,52 @@ class jniEnergyForecast extends IPSModule
     private int $todayTs = 0;
     private array $segments = [];
     private array $gapHours = [];
+    private array $temps = [];          // 'Y-m-d' => Tagesmittel Außentemperatur (Archiv)
+    private array $fcTemps = [];        // 'Y-m-d' => Tagesmittel Vorhersage (Open-Meteo)
+    private ?array $model = null;       // Heizgradtag-Modell
+    private array $hddCache = [];
+    private array $tempCache = [];
+    private array $holidayCache = [];
 
     public function Create()
     {
         parent::Create();
 
+        // Zähler
         $this->RegisterPropertyInteger('CounterVariableID', 0);
         $this->RegisterPropertyFloat('ScaleFactor', 1.0);
         $this->RegisterPropertyString('Unit', 'kWh');
         $this->RegisterPropertyString('MeterChanges', '[]');
+        $this->RegisterPropertyInteger('MeterType', self::METER_DEFAULT);   // 0 = Strom/allgemein, 1 = Gas
+        $this->RegisterPropertyFloat('CalorificValue', 11.0);               // Brennwert kWh/m³ (Gasrechnung)
+        $this->RegisterPropertyFloat('ZNumber', 0.95);                      // Zustandszahl (Gasrechnung)
+
+        // Vertrag
         $this->RegisterPropertyString('PeriodStart', '01.01.');
-        $this->RegisterPropertyFloat('PricePerUnit', 0.0);      // ct je Einheit, brutto
+        $this->RegisterPropertyFloat('PricePerUnit', 0.0);      // ct je Einheit (Gas: je kWh), brutto
         $this->RegisterPropertyFloat('BasePrice', 0.0);         // € je Monat, brutto
         $this->RegisterPropertyFloat('MonthlyAdvance', 0.0);    // Abschlag € je Monat
-        $this->RegisterPropertyFloat('PlannedAnnual', 0.0);     // vertraglicher Jahresverbrauch
+        $this->RegisterPropertyFloat('PlannedAnnual', 0.0);     // vertraglicher Jahresverbrauch (Gas: kWh)
         $this->RegisterPropertyFloat('Bonus', 0.0);             // € je Periode
         $this->RegisterPropertyString('ManualBookings', '[]');
+
+        // Witterung
+        $this->RegisterPropertyInteger('TemperatureVariableID', 0);
+        $this->RegisterPropertyFloat('HeatingLimit', 15.0);
+        $this->RegisterPropertyString('TemperatureValidFrom', '');
+        $this->RegisterPropertyBoolean('SplitDayType', false);
+        $this->RegisterPropertyString('HolidayState', 'SN');
+        $this->RegisterPropertyBoolean('UseOpenMeteo', true);
+        $this->RegisterPropertyFloat('Latitude', 0.0);
+        $this->RegisterPropertyFloat('Longitude', 0.0);
+
+        // Berechnung
         $this->RegisterPropertyInteger('ProfileWeeks', 7);
         $this->RegisterPropertyInteger('UpdateInterval', 15);
         $this->RegisterPropertyBoolean('LogVariables', true);
         $this->RegisterPropertyBoolean('MonthVariables', true);
+
+        $this->RegisterAttributeString('WeatherCache', '');
 
         $this->RegisterTimer('UpdateTimer', 0, 'EFC_Update($_IPS[\'TARGET\']);');
     }
@@ -87,7 +138,9 @@ class jniEnergyForecast extends IPSModule
 
         $this->RegisterMessage(0, IPS_KERNELSTARTED);
 
-        $energy = $this->EnsureProfiles();
+        $gas     = $this->IsGas();
+        $weather = $this->ReadPropertyInteger('TemperatureVariableID') > 0;
+        $energy  = $this->EnsureProfiles();
 
         // ---------- Variablen ----------
         $pos = 0;
@@ -106,7 +159,13 @@ class jniEnergyForecast extends IPSModule
         $this->RegisterVariableFloat('NextConsumption', 'Folgeperiode Verbrauch (Prognose)', $energy, $pos += 10);
         $this->RegisterVariableFloat('NextCost', 'Folgeperiode Kosten (Prognose)', 'EFC.Euro', $pos += 10);
         $this->RegisterVariableFloat('NextAdvance', 'Folgeperiode empfohlener Abschlag', 'EFC.Euro', $pos += 10);
-        $this->RegisterVariableFloat('BaseLoad', 'Grundlast (Ø 7 Tage)', 'EFC.Watt', $pos += 10);
+        if ($gas) {
+            $this->UnregisterVariable('BaseLoad');
+            $this->RegisterVariableFloat('BaseLoadDay', 'Grundlast je Tag', $energy, $pos += 10);
+        } else {
+            $this->UnregisterVariable('BaseLoadDay');
+            $this->RegisterVariableFloat('BaseLoad', 'Grundlast (Ø 7 Tage)', 'EFC.Watt', $pos += 10);
+        }
         $this->RegisterVariableInteger('LastUpdate', 'Letzte Berechnung', '~UnixTimestamp', $pos += 10);
 
         for ($m = 1; $m <= 12; $m++) {
@@ -118,13 +177,54 @@ class jniEnergyForecast extends IPSModule
             }
         }
 
+        // Gas: Werte zusätzlich in kWh
+        $kwhVars = [
+            'TodayForecastKWh'   => 'Heute Prognose (kWh)',
+            'MonthForecastKWh'   => 'Monat Prognose (kWh)',
+            'PeriodActualKWh'    => 'Periode Ist (kWh)',
+            'PeriodForecastKWh'  => 'Periode Prognose (kWh)',
+            'NextConsumptionKWh' => 'Folgeperiode Verbrauch (kWh)',
+            'BaseLoadDayKWh'     => 'Grundlast je Tag (kWh)',
+        ];
+        $pos = 300;
+        foreach ($kwhVars as $ident => $name) {
+            if ($gas) {
+                $this->RegisterVariableFloat($ident, $name, 'EFC.Energy.kWh', $pos += 10);
+            } else {
+                $this->UnregisterVariable($ident);
+            }
+        }
+
+        // Witterung
+        $perUnit = $gas ? 'kWh' : trim($this->ReadPropertyString('Unit'));
+        $weatherVars = [
+            'HddYesterday'        => ['Heizgradtage gestern', 'EFC.HDD'],
+            'HddPeriod'           => ['Heizgradtage Periode bisher', 'EFC.HDD'],
+            'HddPeriodPrev'       => ['Heizgradtage Vorjahr (gleicher Zeitraum)', 'EFC.HDD'],
+            'WeatherAdjDeviation' => ['Witterungsbereinigt ggü. Vorjahr', 'EFC.Deviation'],
+            'PerHdd'              => [$perUnit . ' je Heizgradtag (Modell)', $this->PerHddProfile()],
+            'PerHdd30'            => [$perUnit . ' je Heizgradtag (30 Tage)', $this->PerHddProfile()],
+            'ModelR2'             => ['Modellgüte R²', 'EFC.R2'],
+        ];
+        $pos = 400;
+        foreach ($weatherVars as $ident => [$name, $profile]) {
+            if ($weather) {
+                $this->RegisterVariableFloat($ident, $name, $profile, $pos += 10);
+            } else {
+                $this->UnregisterVariable($ident);
+            }
+        }
+
         // ---------- Archivierung ----------
         $ac = $this->ArchiveID();
         if ($ac > 0) {
             $log = $this->ReadPropertyBoolean('LogVariables');
             $changed = false;
             foreach (self::LOGGED_IDENTS as $ident) {
-                $vid = $this->GetIDForIdent($ident);
+                $vid = @IPS_GetObjectIDByIdent($ident, $this->InstanceID);
+                if ($vid === false) {
+                    continue;
+                }
                 if (AC_GetLoggingStatus($ac, $vid) !== $log) {
                     AC_SetLoggingStatus($ac, $vid, $log);
                     $changed = true;
@@ -135,19 +235,23 @@ class jniEnergyForecast extends IPSModule
             }
         }
 
-        // ---------- Referenzen (Zählervariablen) ----------
+        // ---------- Referenzen ----------
         foreach ($this->GetReferenceList() as $ref) {
             $this->UnregisterReference($ref);
         }
-        $cid = $this->ReadPropertyInteger('CounterVariableID');
-        if ($cid > 0 && IPS_VariableExists($cid)) {
-            $this->RegisterReference($cid);
+        foreach ([$this->ReadPropertyInteger('CounterVariableID'), $this->ReadPropertyInteger('TemperatureVariableID')] as $rid) {
+            if ($rid > 0 && IPS_VariableExists($rid)) {
+                $this->RegisterReference($rid);
+            }
         }
         foreach ($this->ParseMeterChanges() ?? [] as $c) {
             if (IPS_VariableExists($c['vid'])) {
                 $this->RegisterReference($c['vid']);
             }
         }
+
+        // Wettervorhersage nach Konfigurationsänderung neu holen
+        $this->WriteAttributeString('WeatherCache', '');
 
         // ---------- WebHook ----------
         if (IPS_GetKernelRunlevel() === KR_READY) {
@@ -193,7 +297,8 @@ class jniEnergyForecast extends IPSModule
         if ($d === null) {
             return false;
         }
-        $k = $d['kpi'];
+        $k  = $d['kpi'];
+        $kf = $d['kwhFactor'];
 
         $this->SetValue('TodayActual', round($k['todayActual'], 2));
         $this->SetValue('TodayForecast', round($k['todayForecast'], 2));
@@ -210,8 +315,30 @@ class jniEnergyForecast extends IPSModule
         $this->SetValue('NextConsumption', round($k['nextCons'], 0));
         $this->SetValue('NextCost', round($k['nextCost'], 2));
         $this->SetValue('NextAdvance', (float) $k['nextAdvance']);
-        $this->SetValue('BaseLoad', round($k['baseLoad'], 0));
         $this->SetValue('LastUpdate', time());
+
+        if ($d['gas']) {
+            $this->SetIf('BaseLoadDay', round($k['baseLoadDay'], 2));
+            $this->SetIf('TodayForecastKWh', round($k['todayForecast'] * $kf, 1));
+            $this->SetIf('MonthForecastKWh', round($k['monthForecast'] * $kf, 0));
+            $this->SetIf('PeriodActualKWh', round($k['periodActual'] * $kf, 0));
+            $this->SetIf('PeriodForecastKWh', round($k['periodForecast'] * $kf, 0));
+            $this->SetIf('NextConsumptionKWh', round($k['nextCons'] * $kf, 0));
+            $this->SetIf('BaseLoadDayKWh', round($k['baseLoadDay'] * $kf, 1));
+        } else {
+            $this->SetIf('BaseLoad', round($k['baseLoad'], 0));
+        }
+
+        $w = $d['weather'];
+        if ($w !== null) {
+            $this->SetIf('HddYesterday', $w['hddYesterday']);
+            $this->SetIf('HddPeriod', $w['hddPeriod']);
+            $this->SetIf('HddPeriodPrev', $w['hddPeriodPrev']);
+            $this->SetIf('WeatherAdjDeviation', $w['adjDeviation']);
+            $this->SetIf('PerHdd', $w['perHdd']);
+            $this->SetIf('PerHdd30', $w['perHdd30']);
+            $this->SetIf('ModelR2', $w['r2']);
+        }
 
         if ($this->ReadPropertyBoolean('MonthVariables')) {
             foreach ($d['months']['keys'] as $i => $ym) {
@@ -232,8 +359,24 @@ class jniEnergyForecast extends IPSModule
             $d['periodLabel'], $k['periodActual'], $k['periodForecast'], $k['todayForecast'], $k['todayPercent'],
             $d['level'], $k['nextCons'], $k['balance']
         ), 0);
+        if ($w !== null) {
+            $this->SendDebug('Witterung', $this->ModelText($d), 0);
+        }
 
         return true;
+    }
+
+    /** Kurzbeschreibung des Heizgradtag-Modells (Button im Konfigurationsformular) */
+    public function GetModelInfo(): string
+    {
+        $d = $this->Compute();
+        if ($d === null) {
+            return 'Keine Berechnung möglich – Status der Instanz prüfen.';
+        }
+        if ($d['weather'] === null) {
+            return 'Keine Außentemperatur gewählt – witterungsbereinigte Prognose ist aus.';
+        }
+        return $this->ModelText($d);
     }
 
     // =====================================================================================
@@ -254,7 +397,13 @@ class jniEnergyForecast extends IPSModule
         $today = mktime(0, 0, 0, (int) date('n'), (int) date('j'), (int) date('Y'));
         $this->todayTs    = $today;
         $this->levelCache = [];
+        $this->hddCache   = [];
+        $this->tempCache  = [];
         $this->PrepareCounter($ac);
+
+        $gas       = $this->IsGas();
+        $kf        = $this->KwhFactor();
+        $weatherOn = $this->ReadPropertyInteger('TemperatureVariableID') > 0;
 
         [$pStart, $pEnd] = $this->PeriodBounds($today);
         $nStart = $this->AddDays($pEnd, 1);
@@ -274,6 +423,16 @@ class jniEnergyForecast extends IPSModule
             return null;
         }
         $this->SetStatus(102);
+
+        // ---------- Witterung: Temperaturen, Vorhersage, Modell ----------
+        $this->temps   = [];
+        $this->fcTemps = [];
+        $this->model   = null;
+        if ($weatherOn) {
+            $this->LoadTemperatures($ac, $histStart, $now);
+            $this->LoadForecast($today);
+            $this->model = $this->FitModel($today);
+        }
 
         // ---------- Heute Ist (gesamt + je Stunde) ----------
         $todayActual = 0.0;
@@ -341,42 +500,90 @@ class jniEnergyForecast extends IPSModule
         $profileDay = array_sum($hourAvg);
         $baseLoad = count($minHour) ? array_sum($minHour) / count($minHour) * 1000 : 0.0;
 
+        // Grundlast je Tag (Gas): Verbrauch an Tagen ohne Heizbedarf (Warmwasser/Sommer) aus dem Modell,
+        // sonst Ø der 3 niedrigsten Tage der letzten 28 Tage
+        $baseLoadDay = 0.0;
+        if ($this->model !== null) {
+            $baseLoadDay = $this->BaseDay();
+        } else {
+            $last = [];
+            for ($i = 1; $i <= 28; $i++) {
+                $key = date('Y-m-d', $this->AddDays($today, -$i));
+                if (isset($this->daily[$key])) {
+                    $last[] = $this->daily[$key];
+                }
+            }
+            sort($last, SORT_NUMERIC);
+            $low = array_slice($last, 0, 3);
+            $baseLoadDay = count($low) ? array_sum($low) / count($low) : 0.0;
+        }
+
         // ---------- Prognose heute (je Stunde) ----------
+        // Mit Witterungsmodell: Tagessumme aus dem Modell, verteilt nach dem Stundenprofil
+        $scale = 1.0;
+        $uniform = null;
+        if ($this->model !== null) {
+            $hddToday = $this->ExpectedHdd($today);
+            if ($hddToday !== null) {
+                $modelToday = $this->ModelValue($today, $hddToday);
+                if ($profileDay > 0) {
+                    $scale = $modelToday / $profileDay;
+                } else {
+                    $uniform = $modelToday / 24;
+                }
+            }
+        }
         $curHour  = (int) date('G', $now);
         $fracLeft = 1 - ((int) date('i', $now) * 60 + (int) date('s', $now)) / 3600;
         $actH = [];
         $fcH  = [];   // Prognose gesamt der Stunde (Ist + Rest) für die laufende und kommende Stunden
         $restToday = 0.0;
         for ($h = 0; $h < 24; $h++) {
+            $hv = $uniform ?? $hourAvg[$h] * $scale;
             if ($h < $curHour) {
                 $actH[$h] = round($todayH[$h], 3);
                 $fcH[$h]  = null;
             } elseif ($h === $curHour) {
-                $rest = $hourAvg[$h] * $fracLeft;
+                $rest = $hv * $fracLeft;
                 $restToday += $rest;
                 $actH[$h] = round($todayH[$h], 3);
                 $fcH[$h]  = round($todayH[$h] + $rest, 3);
             } else {
-                $restToday += $hourAvg[$h];
+                $restToday += $hv;
                 $actH[$h] = null;
-                $fcH[$h]  = round($hourAvg[$h], 3);
+                $fcH[$h]  = round($hv, 3);
             }
         }
         $todayForecast = $todayActual + $restToday;
         $todayPercent  = $profileDay > 0 ? $todayForecast / $profileDay * 100 : 0.0;
 
+        // Außentemperatur heute je Stunde (Diagramm)
+        $todayTemp = null;
+        if ($weatherOn) {
+            $todayTemp = array_fill(0, 24, null);
+            foreach (AC_GetAggregatedValues($ac, $this->ReadPropertyInteger('TemperatureVariableID'), 0, $today, $now, 0) as $row) {
+                $todayTemp[(int) date('G', (int) $row['TimeStamp'])] = round((float) $row['Avg'], 1);
+            }
+        }
+
         // ---------- Periode: Tagesreihe ----------
         $days = [];
         for ($ts = $pStart; $ts <= $pEnd; $ts = $this->AddDays($ts, 1)) {
-            $prevTs = mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts) - 1);
-            $row = ['ts' => $ts, 'act' => null, 'fc' => 0.0, 'prev' => $this->daily[date('Y-m-d', $prevTs)] ?? null];
+            $prevTs  = mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts) - 1);
+            $key     = date('Y-m-d', $ts);
+            $prevKey = date('Y-m-d', $prevTs);
+            $row = ['ts' => $ts, 'act' => null, 'fc' => 0.0, 'prev' => $this->daily[$prevKey] ?? null, 'hdd' => null, 'hddPrev' => null];
             if ($ts < $today) {
-                $row['act'] = $this->daily[date('Y-m-d', $ts)] ?? 0.0;
+                $row['act'] = $this->daily[$key] ?? 0.0;
             } elseif ($ts === $today) {
                 $row['act'] = $todayActual;
                 $row['fc']  = $restToday;
             } else {
                 $row['fc'] = $this->DayForecast($ts);
+            }
+            if ($weatherOn) {
+                $row['hdd'] = $ts < $today ? (isset($this->temps[$key]) ? $this->Hdd($this->temps[$key]) : null) : $this->ExpectedHdd($ts);
+                $row['hddPrev'] = isset($this->temps[$prevKey]) ? $this->Hdd($this->temps[$prevKey]) : null;
             }
             $days[] = $row;
         }
@@ -391,21 +598,26 @@ class jniEnergyForecast extends IPSModule
             $weights[$i] = $usePrev ? ($r['prev'] ?? $prevMean) : 1.0;
         }
         $wSum = array_sum($weights);
-        $planned = $this->ReadPropertyFloat('PlannedAnnual');
+        // Gas: vertraglicher Jahresverbrauch in kWh -> Zählereinheit
+        $planned = $this->ReadPropertyFloat('PlannedAnnual') / $kf;
 
         // Kumuliert + Monate
-        $months = ['keys' => [], 'labels' => [], 'act' => [], 'fc' => [], 'prev' => [], 'plan' => []];
+        $months = ['keys' => [], 'labels' => [], 'act' => [], 'fc' => [], 'prev' => [], 'plan' => [], 'hdd' => [], 'hddPrev' => []];
         for ($i = 0; $i < 12; $i++) {
             $mts = mktime(0, 0, 0, (int) date('n', $pStart) + $i, 1, (int) date('Y', $pStart));
-            $months['keys'][]   = date('Y-m', $mts);
-            $months['labels'][] = self::MONTH_NAMES[(int) date('n', $mts)] . ' ' . date('y', $mts);
-            $months['act'][]    = 0.0;
-            $months['fc'][]     = 0.0;
-            $months['prev'][]   = 0.0;
-            $months['plan'][]   = 0.0;
+            $months['keys'][]    = date('Y-m', $mts);
+            $months['labels'][]  = self::MONTH_NAMES[(int) date('n', $mts)] . ' ' . date('y', $mts);
+            $months['act'][]     = 0.0;
+            $months['fc'][]      = 0.0;
+            $months['prev'][]    = 0.0;
+            $months['plan'][]    = 0.0;
+            $months['hdd'][]     = 0.0;
+            $months['hddPrev'][] = 0.0;
         }
         $mIndex = array_flip($months['keys']);
         $prevMonthCount = array_fill(0, 12, 0);
+        $hddCount       = array_fill(0, 12, 0);
+        $hddPrevCount   = array_fill(0, 12, 0);
 
         $cum = ['labels' => [], 'ticks' => [], 'act' => [], 'fc' => [], 'prev' => [], 'plan' => []];
         $runAct = 0.0;
@@ -441,6 +653,14 @@ class jniEnergyForecast extends IPSModule
                     $prevMonthCount[$mi]++;
                 }
                 $months['plan'][$mi] += $planned > 0 && $wSum > 0 ? $planned * $weights[$i] / $wSum : 0;
+                if ($r['hdd'] !== null) {
+                    $months['hdd'][$mi] += $r['hdd'];
+                    $hddCount[$mi]++;
+                }
+                if ($r['hddPrev'] !== null) {
+                    $months['hddPrev'][$mi] += $r['hddPrev'];
+                    $hddPrevCount[$mi]++;
+                }
             }
             $cum['labels'][] = date('d.m.Y', $r['ts']);
             $cum['ticks'][]  = (int) date('j', $r['ts']) === 1 ? self::MONTH_NAMES[(int) date('n', $r['ts'])] : '';
@@ -461,10 +681,16 @@ class jniEnergyForecast extends IPSModule
         // Monate aufbereiten (Rundung, leere Werte -> null)
         for ($i = 0; $i < 12; $i++) {
             $mStart = strtotime($months['keys'][$i] . '-01');
-            $months['act'][$i]  = $mStart <= $today ? round($months['act'][$i], 1) : null;
-            $months['fc'][$i]   = $months['fc'][$i] > 0 ? round($months['fc'][$i], 1) : null;
-            $months['prev'][$i] = $prevMonthCount[$i] >= 20 ? round($months['prev'][$i], 1) : null;
-            $months['plan'][$i] = $planned > 0 ? round($months['plan'][$i], 1) : null;
+            $months['act'][$i]     = $mStart <= $today ? round($months['act'][$i], 1) : null;
+            $months['fc'][$i]      = $months['fc'][$i] > 0 ? round($months['fc'][$i], 1) : null;
+            $months['prev'][$i]    = $prevMonthCount[$i] >= 20 ? round($months['prev'][$i], 1) : null;
+            $months['plan'][$i]    = $planned > 0 ? round($months['plan'][$i], 1) : null;
+            $months['hdd'][$i]     = $hddCount[$i] >= 20 ? round($months['hdd'][$i], 0) : null;
+            $months['hddPrev'][$i] = $hddPrevCount[$i] >= 20 ? round($months['hddPrev'][$i], 0) : null;
+        }
+        if (!$weatherOn) {
+            $months['hdd'] = [];
+            $months['hddPrev'] = [];
         }
         $curMi = $mIndex[date('Y-m', $today)] ?? null;
         $monthActual   = $curMi !== null ? (float) $months['act'][$curMi] : 0.0;
@@ -472,13 +698,14 @@ class jniEnergyForecast extends IPSModule
 
         // ---------- Woche ----------
         $monday = $this->AddDays($today, -((int) date('N', $today) - 1));
-        $week = ['labels' => [], 'act' => [], 'fc' => [], 'avg' => [], 'range' => []];
+        $week = ['labels' => [], 'act' => [], 'fc' => [], 'avg' => [], 'range' => [], 'tempAct' => [], 'tempFc' => []];
         $weekActual = 0.0;
         for ($n = 1; $n <= 7; $n++) {
-            $ts = $this->AddDays($monday, $n - 1);
+            $ts  = $this->AddDays($monday, $n - 1);
+            $key = date('Y-m-d', $ts);
             $week['labels'][] = self::WEEKDAY_NAMES[$n] . ' ' . date('d.m.', $ts);
             if ($ts < $today) {
-                $v = $this->daily[date('Y-m-d', $ts)] ?? 0.0;
+                $v = $this->daily[$key] ?? 0.0;
                 $week['act'][] = round($v, 2);
                 $week['fc'][]  = null;
                 $weekActual += $v;
@@ -492,6 +719,22 @@ class jniEnergyForecast extends IPSModule
             }
             $week['avg'][]   = $wdMean[$n] !== null ? round($wdMean[$n], 2) : null;
             $week['range'][] = $wdMin[$n] !== null ? [round($wdMin[$n], 2), round($wdMax[$n], 2)] : null;
+            if ($weatherOn) {
+                $tAct = $ts < $today && isset($this->temps[$key]) ? round($this->temps[$key], 1) : null;
+                $tFc  = $ts >= $today ? $this->ExpectedTemp($ts) : null;
+                $week['tempAct'][] = $tAct;
+                $week['tempFc'][]  = $tFc === null ? null : round($tFc, 1);
+            }
+        }
+        // Temperaturlinie Prognose an Ist anschließen
+        if ($weatherOn) {
+            $ti = (int) date('N', $today) - 1;
+            if ($ti > 0 && $week['tempAct'][$ti - 1] !== null) {
+                $week['tempFc'][$ti - 1] = $week['tempAct'][$ti - 1];
+            }
+        } else {
+            $week['tempAct'] = [];
+            $week['tempFc']  = [];
         }
 
         // ---------- Plan-Abweichung ----------
@@ -501,7 +744,8 @@ class jniEnergyForecast extends IPSModule
         }
 
         // ---------- Kosten ----------
-        $price   = $this->ReadPropertyFloat('PricePerUnit') / 100;
+        // Gas: Arbeitspreis je kWh -> Preis je Zählereinheit
+        $price   = $this->ReadPropertyFloat('PricePerUnit') / 100 * $kf;
         $base    = $this->ReadPropertyFloat('BasePrice');
         $advance = $this->ReadPropertyFloat('MonthlyAdvance');
         $bonus   = $this->ReadPropertyFloat('Bonus');
@@ -518,6 +762,9 @@ class jniEnergyForecast extends IPSModule
         $nextCost    = 12 * $base + $nextCons * $price;
         $nextAdvance = ceil($nextCost / 12);
 
+        // ---------- Witterungs-Kennzahlen ----------
+        $weatherData = $weatherOn ? $this->WeatherKpis($pStart, $today, $kf) : null;
+
         $hourLabels = [];
         for ($h = 0; $h < 24; $h++) {
             $hourLabels[] = sprintf('%02d', $h);
@@ -525,6 +772,9 @@ class jniEnergyForecast extends IPSModule
 
         return [
             'unit'        => $this->ReadPropertyString('Unit'),
+            'gas'         => $gas,
+            'kwhFactor'   => $kf,
+            'perUnit'     => $gas ? 'kWh' : $this->ReadPropertyString('Unit'),
             'price'       => $price,
             'basePrice'   => $base,
             'weeks'       => $weeks,
@@ -549,6 +799,7 @@ class jniEnergyForecast extends IPSModule
                 'nextCost'      => $nextCost,
                 'nextAdvance'   => $nextAdvance,
                 'baseLoad'      => $baseLoad,
+                'baseLoadDay'   => $baseLoadDay,
             ],
             'today' => [
                 'labels'  => $hourLabels,
@@ -557,17 +808,27 @@ class jniEnergyForecast extends IPSModule
                 'fc'      => $fcH,
                 'avg'     => array_map(fn($v) => round($v, 3), $hourAvg),
                 'yest'    => array_map(fn($v) => $v === null ? null : round($v, 3), $yestH),
+                'temp'    => $todayTemp,
                 'curHour' => $curHour,
             ],
-            'week'   => $week,
-            'months' => $months,
-            'cum'    => $cum,
+            'week'    => $week,
+            'months'  => $months,
+            'cum'     => $cum,
+            'weather' => $weatherData,
         ];
     }
 
     /** Prognose für einen kompletten zukünftigen Tag */
     private function DayForecast(int $ts): float
     {
+        // witterungsbereinigt über das Heizgradtag-Modell
+        if ($this->model !== null) {
+            $hdd = $this->ExpectedHdd($ts);
+            if ($hdd !== null) {
+                return $this->ModelValue($ts, $hdd);
+            }
+        }
+
         $wd = (int) date('N', $ts);
         for ($k = 1; $k <= 3; $k++) {
             $center = mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts) - $k);
@@ -624,6 +885,515 @@ class jniEnergyForecast extends IPSModule
             }
         }
         return $sum;
+    }
+
+    // =====================================================================================
+    // Witterung / Heizgradtage
+    // =====================================================================================
+
+    private function Hdd(float $temp): float
+    {
+        return max(0.0, $this->ReadPropertyFloat('HeatingLimit') - $temp);
+    }
+
+    /** Tagesmittel der Außentemperatur aus dem Archiv (ab "gültig ab", plausibel −40..45 °C) */
+    private function LoadTemperatures(int $ac, int $from, int $to): void
+    {
+        $tid = $this->ReadPropertyInteger('TemperatureVariableID');
+        $validFrom = $this->ParseDate($this->ReadPropertyString('TemperatureValidFrom')) ?? 0;
+        $from = max($from, $validFrom);
+        if ($tid <= 0 || $to < $from) {
+            return;
+        }
+        foreach (AC_GetAggregatedValues($ac, $tid, 1, $from, $to, 0) as $row) {
+            $v = (float) $row['Avg'];
+            if ($v < -40 || $v > 45) {
+                continue;
+            }
+            $this->temps[date('Y-m-d', $this->BucketStart(1, (int) $row['TimeStamp']))] = $v;
+        }
+    }
+
+    /** Tagesmittel der nächsten Tage von Open-Meteo, zwischengespeichert für eine Stunde */
+    private function LoadForecast(int $today): void
+    {
+        if (!$this->ReadPropertyBoolean('UseOpenMeteo')) {
+            return;
+        }
+        $cache = json_decode($this->ReadAttributeString('WeatherCache'), true);
+        if (!is_array($cache) || ($cache['fetched'] ?? 0) < time() - 3600) {
+            $coord = $this->Coordinates();
+            if ($coord === null) {
+                $this->SendDebug('Open-Meteo', 'Keine Koordinaten (Standort-Instanz oder Konfiguration)', 0);
+                return;
+            }
+            $url = sprintf(
+                '%s?latitude=%.4F&longitude=%.4F&daily=temperature_2m_mean,temperature_2m_max,temperature_2m_min&timezone=%s&forecast_days=8',
+                self::OPENMETEO_URL, $coord[0], $coord[1], rawurlencode(date_default_timezone_get())
+            );
+            $raw  = @Sys_GetURLContentEx($url, ['Timeout' => 8000]);
+            $json = is_string($raw) ? json_decode($raw, true) : null;
+            if (isset($json['daily']['time']) && is_array($json['daily']['time'])) {
+                $days = [];
+                foreach ($json['daily']['time'] as $i => $date) {
+                    $mean = $json['daily']['temperature_2m_mean'][$i] ?? null;
+                    $max  = $json['daily']['temperature_2m_max'][$i] ?? null;
+                    $min  = $json['daily']['temperature_2m_min'][$i] ?? null;
+                    if ($mean === null && $max !== null && $min !== null) {
+                        $mean = ($max + $min) / 2;
+                    }
+                    if ($mean !== null) {
+                        $days[(string) $date] = (float) $mean;
+                    }
+                }
+                $cache = ['fetched' => time(), 'days' => $days];
+                $this->SendDebug('Open-Meteo', sprintf('%d Tage geladen', count($days)), 0);
+            } else {
+                // bei Fehler in ca. 10 Minuten erneut versuchen, alte Werte behalten
+                $this->SendDebug('Open-Meteo', 'Abruf fehlgeschlagen: ' . $url, 0);
+                $cache = ['fetched' => time() - 3000, 'days' => is_array($cache) ? ($cache['days'] ?? []) : []];
+            }
+            $this->WriteAttributeString('WeatherCache', json_encode($cache));
+        }
+        $todayKey = date('Y-m-d', $today);
+        foreach ($cache['days'] ?? [] as $date => $temp) {
+            if ($date >= $todayKey) {
+                $this->fcTemps[$date] = (float) $temp;
+            }
+        }
+    }
+
+    /** @return array{0:float,1:float}|null Breite, Länge (Konfiguration, sonst Standort-Instanz) */
+    private function Coordinates(): ?array
+    {
+        $lat = $this->ReadPropertyFloat('Latitude');
+        $lon = $this->ReadPropertyFloat('Longitude');
+        if ($lat != 0.0 || $lon != 0.0) {
+            return [$lat, $lon];
+        }
+        $ids = IPS_GetInstanceListByModuleID(self::LOCATION_GUID);
+        if (count($ids) > 0) {
+            $loc = json_decode((string) @IPS_GetProperty($ids[0], 'Location'), true);
+            if (isset($loc['latitude'], $loc['longitude'])) {
+                return [(float) $loc['latitude'], (float) $loc['longitude']];
+            }
+        }
+        return null;
+    }
+
+    /** Erwartete Außentemperatur eines Tages: Vorhersage, sonst Archiv (vergangen), sonst Mittel der Vorjahre */
+    private function ExpectedTemp(int $ts): ?float
+    {
+        $key = date('Y-m-d', $ts);
+        if (array_key_exists($key, $this->tempCache)) {
+            return $this->tempCache[$key];
+        }
+        $v = $this->fcTemps[$key] ?? null;
+        if ($v === null && $ts <= $this->todayTs) {
+            $v = $this->temps[$key] ?? null;
+        }
+        if ($v === null) {
+            $v = $this->PreviousYearsMean($ts, fn(float $t) => $t);
+        }
+        return $this->tempCache[$key] = $v;
+    }
+
+    /** Erwartete Heizgradtage eines Tages (Vorhersage / heute bisher / Mittel der Vorjahre) */
+    private function ExpectedHdd(int $ts): ?float
+    {
+        $key = date('Y-m-d', $ts);
+        if (array_key_exists($key, $this->hddCache)) {
+            return $this->hddCache[$key];
+        }
+        $v = null;
+        if (isset($this->fcTemps[$key])) {
+            $v = $this->Hdd($this->fcTemps[$key]);
+        } elseif ($ts <= $this->todayTs && isset($this->temps[$key])) {
+            $v = $this->Hdd($this->temps[$key]);
+        } else {
+            // HGT je Tag mitteln (nicht die Temperatur), da HGT nicht linear ist
+            $v = $this->PreviousYearsMean($ts, fn(float $t) => $this->Hdd($t));
+        }
+        return $this->hddCache[$key] = $v;
+    }
+
+    /** Mittel einer Funktion der Tagestemperatur über ±3 Tage um den gleichen Kalendertag, 1..3 Jahre zurück */
+    private function PreviousYearsMean(int $ts, callable $fn): ?float
+    {
+        $sum = 0.0;
+        $years = 0;
+        for ($k = 1; $k <= 3; $k++) {
+            $center = mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts) - $k);
+            $vals = [];
+            for ($o = -3; $o <= 3; $o++) {
+                $d = $this->AddDays($center, $o);
+                $key = date('Y-m-d', $d);
+                if ($d < $this->todayTs && isset($this->temps[$key])) {
+                    $vals[] = $fn($this->temps[$key]);
+                }
+            }
+            if (count($vals) >= 4) {
+                $sum += array_sum($vals) / count($vals);
+                $years++;
+            }
+        }
+        return $years > 0 ? $sum / $years : null;
+    }
+
+    /**
+     * Regression Tagesverbrauch = b + a × HGT über die letzten 365 Tage.
+     * Getrennt nach Werktag ('wt') und Wochenende/Feiertag ('we'), falls aktiviert; 'all' immer.
+     */
+    private function FitModel(int $today): ?array
+    {
+        $split = $this->ReadPropertyBoolean('SplitDayType');
+        $from  = $this->AddDays($today, -365);
+        $pts    = ['all' => [], 'wt' => [], 'we' => []];
+        $summer = ['all' => [], 'wt' => [], 'we' => []];
+        for ($ts = $from; $ts < $today; $ts = $this->AddDays($ts, 1)) {
+            $key = date('Y-m-d', $ts);
+            if (!isset($this->daily[$key], $this->temps[$key])) {
+                continue;
+            }
+            $y    = $this->daily[$key];
+            $hdd  = $this->Hdd($this->temps[$key]);
+            $type = $this->IsFreeDay($ts) ? 'we' : 'wt';
+            if ($hdd >= 1.0 && $y > 0) {
+                $p = [round($hdd, 2), round($y, 3), date('d.m.y', $ts)];
+                $pts['all'][] = $p;
+                $pts[$type][] = $p;
+            } elseif ($hdd <= 0.0) {
+                $summer['all'][] = $y;
+                $summer[$type][] = $y;
+            }
+        }
+
+        $models = [];
+        if (count($pts['all']) >= 20) {
+            $models['all'] = $this->Regress($pts['all']);
+        }
+        if (!isset($models['all']) || $models['all'] === null) {
+            $this->SendDebug('Witterung', sprintf('Zu wenig Heiztage für das Modell (%d, mind. 20)', count($pts['all'])), 0);
+            return null;
+        }
+        if ($split) {
+            foreach (['wt', 'we'] as $t) {
+                if (count($pts[$t]) >= 15) {
+                    $r = $this->Regress($pts[$t]);
+                    if ($r !== null) {
+                        $models[$t] = $r;
+                    }
+                }
+            }
+        }
+        $summerBase = [];
+        foreach ($summer as $t => $vals) {
+            if (count($vals) >= 10) {
+                $summerBase[$t] = $this->Median($vals);
+            }
+        }
+
+        $split = $split && isset($models['wt'], $models['we']);
+        if (!$split) {
+            unset($models['wt'], $models['we']);
+        }
+        return [
+            'split'  => $split,
+            'models' => $models,
+            'summer' => $summerBase,
+            'points' => $split ? ['wt' => $pts['wt'], 'we' => $pts['we']] : ['all' => $pts['all']],
+        ];
+    }
+
+    /** Lineare Regression mit einem Durchlauf Ausreißer-Bereinigung (|Residuum| > 2,5 σ) */
+    private function Regress(array $pts): ?array
+    {
+        $fit = function (array $p): ?array {
+            $n = count($p);
+            if ($n < 3) {
+                return null;
+            }
+            $sx = $sy = $sxx = $sxy = 0.0;
+            foreach ($p as [$x, $y]) {
+                $sx += $x;
+                $sy += $y;
+                $sxx += $x * $x;
+                $sxy += $x * $y;
+            }
+            $den = $n * $sxx - $sx * $sx;
+            if (abs($den) < 1e-9) {
+                return null;
+            }
+            $a = ($n * $sxy - $sx * $sy) / $den;
+            $b = ($sy - $a * $sx) / $n;
+            $mean = $sy / $n;
+            $ssRes = $ssTot = 0.0;
+            foreach ($p as [$x, $y]) {
+                $ssRes += ($y - ($b + $a * $x)) ** 2;
+                $ssTot += ($y - $mean) ** 2;
+            }
+            return [
+                'a'  => $a,
+                'b'  => $b,
+                'r2' => $ssTot > 0 ? 1 - $ssRes / $ssTot : 0.0,
+                'sd' => sqrt($ssRes / max(1, $n - 2)),
+                'n'  => $n,
+            ];
+        };
+
+        $r = $fit($pts);
+        if ($r === null) {
+            return null;
+        }
+        $keep = array_values(array_filter($pts, fn($p) => abs($p[1] - ($r['b'] + $r['a'] * $p[0])) <= 2.5 * $r['sd']));
+        if (count($keep) >= 10 && count($keep) < count($pts)) {
+            $r2 = $fit($keep);
+            if ($r2 !== null) {
+                $r2['outliers'] = count($pts) - count($keep);
+                return $r2;
+            }
+        }
+        $r['outliers'] = 0;
+        return $r;
+    }
+
+    /** Modelltyp für einen Tag ('wt', 'we' oder 'all') */
+    private function ModelType(int $ts): string
+    {
+        if ($this->model !== null && $this->model['split']) {
+            return $this->IsFreeDay($ts) ? 'we' : 'wt';
+        }
+        return 'all';
+    }
+
+    /** Erwarteter Tagesverbrauch aus dem Modell */
+    private function ModelValue(int $ts, float $hdd): float
+    {
+        $type = $this->ModelType($ts);
+        $m = $this->model['models'][$type] ?? $this->model['models']['all'];
+        if ($hdd <= 0.0) {
+            return max(0.0, $this->model['summer'][$type] ?? $this->model['summer']['all'] ?? $m['b']);
+        }
+        return max(0.0, $m['b'] + $m['a'] * $hdd);
+    }
+
+    /** Mittelwert eines Modellparameters über die Woche (5 Werktage + 2 freie Tage) */
+    private function ModelAvg(string $param): float
+    {
+        if ($this->model === null) {
+            return 0.0;
+        }
+        $m = $this->model['models'];
+        $v = $this->model['split'] ? (5 * $m['wt'][$param] + 2 * $m['we'][$param]) / 7 : $m['all'][$param];
+        return max(0.0, $v);
+    }
+
+    /**
+     * Grundlast je Tag ohne Heizbedarf: Median der Sommertage (HGT = 0) der letzten 365 Tage,
+     * ohne genügend Sommertage der (mittlere) Achsenabschnitt des Modells, mindestens 0
+     */
+    private function BaseDay(): float
+    {
+        if ($this->model === null) {
+            return 0.0;
+        }
+        $s = $this->model['summer'];
+        if ($this->model['split'] && isset($s['wt'], $s['we'])) {
+            return max(0.0, (5 * $s['wt'] + 2 * $s['we']) / 7);
+        }
+        if (isset($s['all'])) {
+            return max(0.0, $s['all']);
+        }
+        return $this->ModelAvg('b');
+    }
+
+    /** Kennzahlen der Witterungsbereinigung */
+    private function WeatherKpis(int $pStart, int $today, float $kf): array
+    {
+        $yest = $this->AddDays($today, -1);
+        $yKey = date('Y-m-d', $yest);
+
+        // Periode bisher (bis gestern) gegen gleichen Zeitraum im Vorjahr, nur Tage mit Daten in beiden Jahren
+        $hddCur = $hddPrev = $yCur = $yPrev = 0.0;
+        $pairs = 0;
+        $span = 0;
+        $hddPeriod = $hddPeriodPrev = 0.0;
+        for ($ts = $pStart; $ts < $today; $ts = $this->AddDays($ts, 1)) {
+            $span++;
+            $k  = date('Y-m-d', $ts);
+            $kp = date('Y-m-d', mktime(0, 0, 0, (int) date('n', $ts), (int) date('j', $ts), (int) date('Y', $ts) - 1));
+            if (isset($this->temps[$k])) {
+                $hddPeriod += $this->Hdd($this->temps[$k]);
+            }
+            if (isset($this->temps[$kp])) {
+                $hddPeriodPrev += $this->Hdd($this->temps[$kp]);
+            }
+            if (isset($this->daily[$k], $this->daily[$kp], $this->temps[$k], $this->temps[$kp])) {
+                $pairs++;
+                $yCur += $this->daily[$k];
+                $yPrev += $this->daily[$kp];
+                $hddCur += $this->Hdd($this->temps[$k]);
+                $hddPrev += $this->Hdd($this->temps[$kp]);
+            }
+        }
+        // Vorjahr auf das Wetter dieses Jahres umrechnen: Grundlast bleibt, Heizanteil skaliert mit den HGT
+        $adj = null;
+        if ($span > 0 && $pairs >= max(14, 0.8 * $span) && $hddPrev >= 20 && $hddCur > 0) {
+            $baseSum = $pairs * $this->BaseDay();
+            $prevAdj = $baseSum + max(0.0, $yPrev - $baseSum) * $hddCur / $hddPrev;
+            if ($prevAdj > 0) {
+                $adj = round(($yCur / $prevAdj - 1) * 100, 1);
+            }
+        }
+
+        // Verbrauch je HGT der letzten 30 Tage (ohne Grundlast)
+        $sumHeat = $sumHdd = 0.0;
+        for ($i = 1; $i <= 30; $i++) {
+            $ts = $this->AddDays($today, -$i);
+            $k  = date('Y-m-d', $ts);
+            if (!isset($this->daily[$k], $this->temps[$k])) {
+                continue;
+            }
+            $hdd = $this->Hdd($this->temps[$k]);
+            if ($hdd >= 1.0 && $this->daily[$k] > 0) {
+                $sumHeat += $this->daily[$k] - $this->BaseDay();
+                $sumHdd += $hdd;
+            }
+        }
+        $perHdd30 = $sumHdd >= 30 ? round($sumHeat / $sumHdd * $kf, 2) : null;
+
+        // Modellgüte (bei getrennten Modellen nach Anzahl gewichtet)
+        $r2 = null;
+        $models = null;
+        $points = [];
+        if ($this->model !== null) {
+            $m = $this->model['models'];
+            $r2 = $this->model['split']
+                ? ($m['wt']['r2'] * $m['wt']['n'] + $m['we']['r2'] * $m['we']['n']) / ($m['wt']['n'] + $m['we']['n'])
+                : $m['all']['r2'];
+            $r2 = round($r2, 2);
+            foreach ($m as $t => $p) {
+                $models[$t] = [
+                    'a' => round($p['a'], 4), 'b' => round($p['b'], 3), 'r2' => round($p['r2'], 3),
+                    'n' => $p['n'], 'outliers' => $p['outliers'], 'summer' => $this->model['summer'][$t] ?? null,
+                ];
+            }
+            $points = $this->model['points'];
+        }
+
+        return [
+            'limit'         => $this->ReadPropertyFloat('HeatingLimit'),
+            'split'         => $this->model !== null && $this->model['split'],
+            'models'        => $models,
+            'points'        => $points,
+            'r2'            => $r2,
+            'hddYesterday'  => isset($this->temps[$yKey]) ? round($this->Hdd($this->temps[$yKey]), 1) : null,
+            'hddPeriod'     => round($hddPeriod, 0),
+            'hddPeriodPrev' => round($hddPeriodPrev, 0),
+            'adjDeviation'  => $adj,
+            'pairs'         => $pairs,
+            'span'          => $span,
+            'perHdd'        => $this->model !== null ? round($this->ModelAvg('a') * $kf, 2) : null,
+            'perHdd30'      => $perHdd30,
+            'forecastDays'  => count($this->fcTemps),
+        ];
+    }
+
+    private function ModelText(array $d): string
+    {
+        $w = $d['weather'];
+        $u = $d['unit'];
+        if ($w['models'] === null) {
+            return 'Witterung aktiv, aber zu wenig Heiztage für ein Modell (mind. 20 Tage mit HGT ≥ 1 und Verbrauch in den letzten 365 Tagen).';
+        }
+        $names = ['all' => 'Alle Tage', 'wt' => 'Werktage', 'we' => 'Wochenende/Feiertage'];
+        $lines = [sprintf('Heizgrenze %.1f °C, Regression über die letzten 365 Tage', $w['limit'])];
+        foreach ($w['models'] as $t => $m) {
+            $lines[] = sprintf(
+                '%s: %.2f %s + %.3f %s × HGT (R² %.2f, %d Tage, %d Ausreißer)%s',
+                $names[$t], $m['b'], $u, $m['a'], $u, $m['r2'], $m['n'], $m['outliers'],
+                $m['summer'] !== null ? sprintf(', Sommer-Grundlast %.2f %s/Tag', $m['summer'], $u) : ''
+            );
+        }
+        $lines[] = $w['split'] ? 'Prognose getrennt nach Werktag / Wochenende+Feiertag' : 'Prognose mit einem Modell für alle Tage';
+        $lines[] = sprintf('%s je Heizgradtag: %s (Modell) / %s (30 Tage)', $d['perUnit'],
+            $w['perHdd'] ?? '–', $w['perHdd30'] ?? '–');
+        $lines[] = sprintf('Heizgradtage Periode bisher %s Kd, Vorjahr %s Kd; witterungsbereinigt ggü. Vorjahr: %s',
+            $w['hddPeriod'], $w['hddPeriodPrev'], $w['adjDeviation'] === null ? '– (zu wenig Vergleichsdaten)' : sprintf('%+.1f %%', $w['adjDeviation']));
+        $lines[] = sprintf('Wettervorhersage: %d Tage (Open-Meteo)', $w['forecastDays']);
+        return implode("\n", $lines);
+    }
+
+    // =====================================================================================
+    // Feiertage
+    // =====================================================================================
+
+    private function IsFreeDay(int $ts): bool
+    {
+        if ((int) date('N', $ts) >= 6) {
+            return true;
+        }
+        $y = (int) date('Y', $ts);
+        if (!isset($this->holidayCache[$y])) {
+            $this->holidayCache[$y] = $this->Holidays($y, strtoupper(trim($this->ReadPropertyString('HolidayState'))));
+        }
+        return isset($this->holidayCache[$y][date('m-d', $ts)]);
+    }
+
+    /** Gesetzliche Feiertage in Deutschland je Bundesland, Schlüssel 'MM-TT' */
+    private function Holidays(int $y, string $state): array
+    {
+        $in = fn(array $states) => in_array($state, $states, true);
+
+        // Ostersonntag (Gauß / Meeus)
+        $a = $y % 19;
+        $b = intdiv($y, 100);
+        $c = $y % 100;
+        $d = intdiv($b, 4);
+        $e = $b % 4;
+        $f = intdiv($b + 8, 25);
+        $g = intdiv($b - $f + 1, 3);
+        $h = (19 * $a + $b - $d - $g + 15) % 30;
+        $i = intdiv($c, 4);
+        $k = $c % 4;
+        $l = (32 + 2 * $e + 2 * $i - $h - $k) % 7;
+        $m = intdiv($a + 11 * $h + 22 * $l, 451);
+        $month = intdiv($h + $l - 7 * $m + 114, 31);
+        $day = (($h + $l - 7 * $m + 114) % 31) + 1;
+        $easter = mktime(0, 0, 0, $month, $day, $y);
+        $rel = fn(int $days) => date('m-d', $this->AddDays($easter, $days));
+
+        $list = ['01-01', $rel(-2), $rel(1), '05-01', $rel(39), $rel(50), '10-03', '12-25', '12-26'];
+        if ($in(['BW', 'BY', 'ST'])) {
+            $list[] = '01-06';
+        }
+        if ($in(['BE', 'MV'])) {
+            $list[] = '03-08';
+        }
+        if ($in(['BW', 'BY', 'HE', 'NW', 'RP', 'SL'])) {
+            $list[] = $rel(60);
+        }
+        if ($in(['SL'])) {
+            $list[] = '08-15';
+        }
+        if ($in(['TH'])) {
+            $list[] = '09-20';
+        }
+        if ($in(['BB', 'HB', 'HH', 'MV', 'NI', 'SH', 'SN', 'ST', 'TH'])) {
+            $list[] = '10-31';
+        }
+        if ($in(['BW', 'BY', 'NW', 'RP', 'SL'])) {
+            $list[] = '11-01';
+        }
+        if ($in(['SN'])) {
+            // Buß- und Bettag: Mittwoch vor dem 23. November
+            $bb = mktime(0, 0, 0, 11, 22, $y);
+            while ((int) date('N', $bb) !== 3) {
+                $bb = $this->AddDays($bb, -1);
+            }
+            $list[] = date('m-d', $bb);
+        }
+        return array_fill_keys($list, true);
     }
 
     // =====================================================================================
@@ -790,7 +1560,7 @@ class jniEnergyForecast extends IPSModule
         }
 
         $chart = preg_replace('/[^a-z]/', '', strtolower((string) ($_GET['chart'] ?? 'dashboard')));
-        if (!in_array($chart, ['dashboard', 'today', 'week', 'months', 'period'], true)) {
+        if (!in_array($chart, ['dashboard', 'today', 'week', 'months', 'period', 'model'], true)) {
             $chart = 'dashboard';
         }
         $theme   = (($_GET['theme'] ?? 'dark') === 'light') ? 'light' : 'dark';
@@ -815,6 +1585,7 @@ class jniEnergyForecast extends IPSModule
                 'ist' => '#4ea8de', 'fc' => 'rgba(78,168,222,0.10)', 'hatch' => 'rgba(78,168,222,0.80)', 'istFill' => 'rgba(78,168,222,0.14)',
                 'avg' => '#e9ecef', 'prev' => '#f4a261', 'plan' => '#8b949e', 'range' => 'rgba(255,255,255,0.09)',
                 'pos' => '#56d364', 'neg' => '#f85149', 'posA' => 'rgba(86,211,100,0.16)', 'negA' => 'rgba(248,81,73,0.16)',
+                'temp' => '#c792ea', 'tempA' => 'rgba(199,146,234,0.55)', 'dotA' => 'rgba(78,168,222,0.55)', 'dotB' => 'rgba(244,162,97,0.60)',
             ],
             'light' => [
                 'bg' => '#f6f8fa', 'card' => '#ffffff', 'border' => 'rgba(0,0,0,0.08)',
@@ -822,6 +1593,7 @@ class jniEnergyForecast extends IPSModule
                 'ist' => '#1f78b4', 'fc' => 'rgba(31,120,180,0.08)', 'hatch' => 'rgba(31,120,180,0.75)', 'istFill' => 'rgba(31,120,180,0.10)',
                 'avg' => '#343a40', 'prev' => '#e76f51', 'plan' => '#6e7781', 'range' => 'rgba(0,0,0,0.07)',
                 'pos' => '#1a7f37', 'neg' => '#cf222e', 'posA' => 'rgba(26,127,55,0.14)', 'negA' => 'rgba(207,34,46,0.14)',
+                'temp' => '#8250df', 'tempA' => 'rgba(130,80,223,0.50)', 'dotA' => 'rgba(31,120,180,0.50)', 'dotB' => 'rgba(231,111,81,0.55)',
             ],
         ];
         $t = $themes[$theme];
@@ -884,8 +1656,12 @@ if (!D) {
   root.innerHTML = '<div class="err">Chart.js konnte nicht geladen werden.</div>';
 } else {
   const U = D.unit;
+  const W = D.weather;
+  const hasModel = !!(W && W.models);
   const nf = (v, d = 1) => v == null ? '–' : Number(v).toLocaleString('de-DE', { minimumFractionDigits: d, maximumFractionDigits: d });
+  const sgn = v => v == null ? '–' : (v > 0 ? '+' : '') + nf(v, 1);
   const eur = v => nf(v, 2) + ' €';
+  const KW = v => D.kwhFactor !== 1 ? ` · ${nf(v * D.kwhFactor, 0)} kWh` : '';
   const K = D.kpi;
 
   Chart.defaults.color = T.muted;
@@ -903,14 +1679,22 @@ if (!D) {
   Chart.defaults.plugins.tooltip.padding = 8;
   Chart.defaults.elements.bar.borderRadius = 3;
 
+  // Datasets mit eigener Einheit (°C, Kd) bekommen dataset.unit, Verbrauch zusätzlich in kWh (Gas)
   const tipLabel = c => {
     if (Array.isArray(c.raw)) return ` ${c.dataset.label}: ${nf(c.raw[0])} – ${nf(c.raw[1])} ${U}`;
     if (c.raw == null) return null;
-    return ` ${c.dataset.label}: ${nf(c.parsed.y, c.dataset.digits ?? 1)} ${U}`;
+    const u = c.dataset.unit ?? U;
+    let s = ` ${c.dataset.label}: ${nf(c.parsed.y, c.dataset.digits ?? 1)} ${u}`;
+    if (!c.dataset.unit && D.kwhFactor !== 1) s += ` (${nf(c.parsed.y * D.kwhFactor, 0)} kWh)`;
+    return s;
   };
   const yAxis = (extra = {}) => Object.assign({ beginAtZero: true, grid: { color: T.grid }, border: { display: false },
                                                 ticks: { callback: v => nf(v, 0) } }, extra);
   const xAxis = (extra = {}) => Object.assign({ grid: { display: false }, border: { color: T.grid } }, extra);
+  const sideAxis = (suffix, extra = {}) => Object.assign({ position: 'right', grid: { display: false }, border: { display: false },
+                                                          ticks: { maxTicksLimit: 6, callback: v => nf(v, 0) + suffix } }, extra);
+  const tempLine = (label, data, dashed = false) => ({ type: 'line', label, data, yAxisID: 'yT', borderColor: T.temp, backgroundColor: T.temp,
+    borderWidth: 1.5, borderDash: dashed ? [4, 3] : [], pointRadius: 2, tension: .3, order: 0, unit: '°C', digits: 1, spanGaps: true });
   const hatch = (line, fill) => {
     const c = document.createElement('canvas'); c.width = c.height = 8;
     const x = c.getContext('2d'); x.fillStyle = fill; x.fillRect(0, 0, 8, 8);
@@ -919,51 +1703,71 @@ if (!D) {
     return x.createPattern(c, 'repeat');
   };
   const FC = hatch(T.hatch, T.fc);
+  const modelFormula = m => `${nf(m.b, 2)} + ${nf(m.a, 2)} × HGT`;
 
   const charts = {
     today: {
       title: 'Heute',
-      sub: () => `Prognose ${nf(K.todayForecast, 1)} ${U} · bisher ${nf(K.todayActual, 1)} ${U} · ${nf(K.todayPercent, 0)} % vom Ø ${D.today.wdName}`,
-      cfg: () => ({
-        type: 'bar',
-        data: { labels: D.today.labels, datasets: [
+      sub: () => `Prognose ${nf(K.todayForecast, 1)} ${U}${KW(K.todayForecast)} · bisher ${nf(K.todayActual, 1)} ${U} · ${nf(K.todayPercent, 0)} % vom Ø ${D.today.wdName}`,
+      cfg: () => {
+        const ds = [
           { type: 'line', label: 'Ø ' + D.today.wdName, data: D.today.avg, borderColor: T.avg, borderWidth: 2, pointRadius: 0, tension: .35, order: 1, digits: 2 },
           { type: 'line', label: 'Gestern', data: D.today.yest, borderColor: T.prev, borderWidth: 1.5, borderDash: [4, 4], pointRadius: 0, tension: .35, order: 2, digits: 2 },
           { label: 'Ist', data: D.today.act, backgroundColor: T.ist, grouped: false, barPercentage: .8, order: 3, digits: 2 },
           { label: 'Prognose', data: D.today.fc, backgroundColor: FC, grouped: false, barPercentage: .8, order: 4, digits: 2 },
-        ] },
-        options: { scales: { x: xAxis(), y: yAxis({ ticks: { callback: v => nf(v, 1) } }) },
-                   plugins: { tooltip: { callbacks: { label: tipLabel } } } }
-      })
+        ];
+        const scales = { x: xAxis(), y: yAxis({ ticks: { callback: v => nf(v, 1) } }) };
+        if (D.today.temp) {
+          ds.push(Object.assign(tempLine('Außentemperatur', D.today.temp), { pointRadius: 0 }));
+          scales.yT = sideAxis(' °C');
+        }
+        return { type: 'bar', data: { labels: D.today.labels, datasets: ds },
+                 options: { scales, plugins: { tooltip: { callbacks: { label: tipLabel } } } } };
+      }
     },
     week: {
       title: 'Aktuelle Woche',
-      sub: () => `bisher ${nf(K.weekActual, 1)} ${U} · Spanne und Ø der letzten ${D.weeks} Wochen je Wochentag`,
-      cfg: () => ({
-        type: 'bar',
-        data: { labels: D.week.labels, datasets: [
+      sub: () => `bisher ${nf(K.weekActual, 1)} ${U}${KW(K.weekActual)} · Spanne und Ø der letzten ${D.weeks} Wochen je Wochentag`,
+      cfg: () => {
+        const ds = [
           { type: 'line', label: 'Ø', data: D.week.avg, borderColor: T.avg, backgroundColor: T.avg, showLine: false, pointStyle: 'line', pointRadius: 16, pointHoverRadius: 16, pointBorderWidth: 2.5, order: 1 },
           { label: 'Ist', data: D.week.act, backgroundColor: T.ist, grouped: false, barPercentage: .45, order: 2 },
           { label: 'Prognose', data: D.week.fc, backgroundColor: FC, grouped: false, barPercentage: .45, order: 3 },
           { label: `Spanne ${D.weeks} Wo.`, data: D.week.range, backgroundColor: T.range, grouped: false, barPercentage: .85, borderRadius: 5, order: 4 },
-        ] },
-        options: { scales: { x: xAxis(), y: yAxis() }, plugins: { tooltip: { callbacks: { label: tipLabel } } } }
-      })
+        ];
+        const scales = { x: xAxis(), y: yAxis() };
+        if (D.week.tempAct.length) {
+          ds.push(tempLine('Ø Temp.', D.week.tempAct));
+          ds.push(tempLine('Ø Temp. erwartet', D.week.tempFc, true));
+          scales.yT = sideAxis(' °C');
+        }
+        return { type: 'bar', data: { labels: D.week.labels, datasets: ds },
+                 options: { scales, plugins: { tooltip: { callbacks: { label: tipLabel } } } } };
+      }
     },
     months: {
       title: 'Monate der Periode',
-      sub: () => `${D.periodLabel} · Ist + Prognose ggü. Vorjahr und Plan`,
+      sub: () => `${D.periodLabel} · Ist + Prognose ggü. Vorjahr und Plan` + (D.months.hdd.length ? ' · Heizgradtage' : ''),
       cfg: () => {
         const total = D.months.fc.map((f, i) => f == null ? null : Math.round(((D.months.act[i] || 0) + f) * 10) / 10);
+        const ds = [
+          { type: 'line', label: 'Vorjahr', data: D.months.prev, borderColor: T.prev, backgroundColor: T.prev, borderWidth: 2, pointRadius: 3, tension: .3, order: 1 },
+          { type: 'line', label: 'Plan', data: D.months.plan, borderColor: T.plan, backgroundColor: T.plan, showLine: false, pointStyle: 'line', pointRadius: 18, pointHoverRadius: 18, pointBorderWidth: 2, order: 2 },
+          { label: 'Ist', data: D.months.act, backgroundColor: T.ist, grouped: false, barPercentage: .65, order: 3 },
+          { label: 'Prognose', data: total, backgroundColor: FC, grouped: false, barPercentage: .65, order: 4 },
+        ];
+        const scales = { x: xAxis(), y: yAxis() };
+        if (D.months.hdd.length) {
+          ds.push({ type: 'line', label: 'Heizgradtage', data: D.months.hdd, yAxisID: 'yH', borderColor: T.temp, backgroundColor: T.temp,
+                    borderWidth: 1.5, pointRadius: 2.5, tension: .3, order: 0, unit: 'Kd', digits: 0 });
+          ds.push({ type: 'line', label: 'HGT Vorjahr', data: D.months.hddPrev, yAxisID: 'yH', borderColor: T.tempA, backgroundColor: T.tempA,
+                    borderWidth: 1.2, borderDash: [4, 3], pointRadius: 0, tension: .3, order: 0, unit: 'Kd', digits: 0 });
+          scales.yH = sideAxis(' Kd', { beginAtZero: true });
+        }
         return {
           type: 'bar',
-          data: { labels: D.months.labels, datasets: [
-            { type: 'line', label: 'Vorjahr', data: D.months.prev, borderColor: T.prev, backgroundColor: T.prev, borderWidth: 2, pointRadius: 3, tension: .3, order: 1 },
-            { type: 'line', label: 'Plan', data: D.months.plan, borderColor: T.plan, backgroundColor: T.plan, showLine: false, pointStyle: 'line', pointRadius: 18, pointHoverRadius: 18, pointBorderWidth: 2, order: 2 },
-            { label: 'Ist', data: D.months.act, backgroundColor: T.ist, grouped: false, barPercentage: .65, order: 3 },
-            { label: 'Prognose', data: total, backgroundColor: FC, grouped: false, barPercentage: .65, order: 4 },
-          ] },
-          options: { scales: { x: xAxis(), y: yAxis() },
+          data: { labels: D.months.labels, datasets: ds },
+          options: { scales,
                      plugins: { tooltip: { callbacks: {
                        label: tipLabel,
                        footer: items => {
@@ -976,7 +1780,7 @@ if (!D) {
     },
     period: {
       title: 'Periodenverlauf (kumuliert)',
-      sub: () => `Prognose ${nf(K.periodForecast, 0)} ${U} · Plan-Abw. ${K.planDeviation >= 0 ? '+' : ''}${nf(K.planDeviation, 1)} %`,
+      sub: () => `Prognose ${nf(K.periodForecast, 0)} ${U}${KW(K.periodForecast)} · Plan-Abw. ${K.planDeviation >= 0 ? '+' : ''}${nf(K.planDeviation, 1)} %`,
       cfg: () => {
         const diff = D.cum.labels.map((_, i) => {
           const v = D.cum.act[i] ?? D.cum.fc[i];
@@ -1006,6 +1810,47 @@ if (!D) {
         };
       }
     },
+    model: {
+      title: 'Heizgradtag-Modell',
+      sub: () => {
+        const M = W.models;
+        const txt = W.split
+          ? `Werktag ${modelFormula(M.wt)} (R² ${nf(M.wt.r2, 2)}) · frei ${modelFormula(M.we)} (R² ${nf(M.we.r2, 2)})`
+          : `${modelFormula(M.all)} (R² ${nf(M.all.r2, 2)})`;
+        return `${txt} · ${U}/Tag, Heizgrenze ${nf(W.limit, 0)} °C, letzte 365 Tage`;
+      },
+      cfg: () => {
+        const M = W.models;
+        const sets = W.split
+          ? [['wt', 'Werktage', T.dotA, T.ist], ['we', 'Wochenende/Feiertag', T.dotB, T.prev]]
+          : [['all', 'Heiztage', T.dotA, T.ist]];
+        const all = Object.values(W.points).flat();
+        const xMax = Math.ceil(Math.max(20, ...all.map(p => p[0])) / 5) * 5;
+        const ds = [];
+        sets.forEach(([k, label, dot, line]) => {
+          const m = M[k];
+          ds.push({ type: 'scatter', label, data: (W.points[k] || []).map(p => ({ x: p[0], y: p[1], d: p[2] })),
+                    backgroundColor: dot, borderColor: dot, pointRadius: 3, pointHoverRadius: 5, order: 2 });
+          ds.push({ type: 'line', label: 'Modell ' + label, data: [{ x: 1, y: m.b + m.a }, { x: xMax, y: m.b + m.a * xMax }],
+                    borderColor: line, borderWidth: 2, pointRadius: 0, order: 1, isModel: true });
+        });
+        return {
+          type: 'scatter',
+          data: { datasets: ds },
+          options: {
+            interaction: { mode: 'nearest', intersect: true },
+            scales: {
+              x: { type: 'linear', min: 0, max: xMax, grid: { color: T.grid }, border: { display: false },
+                   title: { display: true, text: 'Heizgradtage (Kd)', color: T.muted } },
+              y: yAxis({ title: { display: true, text: U + ' / Tag', color: T.muted } }),
+            },
+            plugins: { tooltip: { callbacks: { label: c => c.dataset.isModel
+              ? ` ${c.dataset.label}: ${nf(c.parsed.y, 1)} ${U} bei ${nf(c.parsed.x, 0)} Kd`
+              : ` ${c.raw.d}: ${nf(c.raw.x, 1)} Kd → ${nf(c.raw.y, 1)} ${U}` + (D.kwhFactor !== 1 ? ` (${nf(c.raw.y * D.kwhFactor, 0)} kWh)` : '') } } }
+          }
+        };
+      }
+    },
   };
 
   const card = (key, single) => {
@@ -1018,19 +1863,35 @@ if (!D) {
   let keys;
   if (VIEW === 'dashboard') {
     keys = ['today', 'week', 'months', 'period'];
+    if (hasModel) keys.push('model');
     const bal = K.balance;
+    const base = D.gas
+      ? kpi('Grundlast', `${nf(K.baseLoadDay, 1)} ${U}/Tag`, (hasModel ? 'Tage ohne Heizbedarf' : '3 niedrigste Tage') + KW(K.baseLoadDay))
+      : kpi('Grundlast', `${nf(K.baseLoad, 0)} W`, 'Ø 7 Tage');
+    let wx = '';
+    if (W) {
+      const adj = W.adjDeviation;
+      wx = kpi('Witterungsbereinigt', adj == null ? '–' : `${sgn(adj)} %`,
+               `ggü. Vorjahr · HGT ${nf(W.hddPeriod, 0)} / Vj ${nf(W.hddPeriodPrev, 0)}`, adj == null ? '' : (adj > 0 ? 'neg' : 'pos')) +
+           kpi('Je Heizgradtag', W.perHdd == null ? '–' : `${nf(W.perHdd, 1)} ${D.perUnit}`,
+               `30 Tage: ${nf(W.perHdd30, 1)} · R² ${nf(W.r2, 2)}`);
+    }
     root.innerHTML =
       '<div class="kpis">' +
-        kpi('Heute', `${nf(K.todayForecast, 1)} ${U}`, `${nf(K.todayPercent, 0)} % vom Ø`) +
-        kpi('Monat', `${nf(K.monthForecast, 0)} ${U}`, `bisher ${nf(K.monthActual, 0)} ${U}`) +
-        kpi('Periode', `${nf(K.periodForecast, 0)} ${U}`, `bisher ${nf(K.periodActual, 0)} ${U}`) +
+        kpi('Heute', `${nf(K.todayForecast, 1)} ${U}`, `${nf(K.todayPercent, 0)} % vom Ø${KW(K.todayForecast)}`) +
+        kpi('Monat', `${nf(K.monthForecast, 0)} ${U}`, `bisher ${nf(K.monthActual, 0)} ${U}${KW(K.monthForecast)}`) +
+        kpi('Periode', `${nf(K.periodForecast, 0)} ${U}`, `bisher ${nf(K.periodActual, 0)} ${U}${KW(K.periodForecast)}`) +
         kpi('Plan-Abweichung', `${K.planDeviation >= 0 ? '+' : ''}${nf(K.planDeviation, 1)} %`, 'saisonal bis gestern', K.planDeviation > 0 ? 'neg' : 'pos') +
         kpi('Saldo Periode', eur(bal), bal >= 0 ? 'Guthaben' : 'Nachzahlung', bal >= 0 ? 'pos' : 'neg') +
-        kpi('Abschlag neu', eur(K.nextAdvance), `${nf(K.nextCons, 0)} ${U} / Jahr`) +
-        kpi('Grundlast', `${nf(K.baseLoad, 0)} W`, 'Ø 7 Tage') +
+        kpi('Abschlag neu', eur(K.nextAdvance), `${nf(K.nextCons, 0)} ${U} / Jahr${KW(K.nextCons)}`) +
+        base + wx +
       '</div>' +
       '<div class="grid">' + keys.map(k => card(k)).join('') + '</div>' +
-      `<div class="foot">Stand ${D.updated} · Periode ${D.periodLabel}</div>`;
+      `<div class="foot">Stand ${D.updated} · Periode ${D.periodLabel}` +
+        (W ? ` · Wettervorhersage ${W.forecastDays} Tage (Open-Meteo)` : '') + '</div>';
+  } else if (VIEW === 'model' && !hasModel) {
+    keys = [];
+    root.innerHTML = '<div class="err">Kein Heizgradtag-Modell – Außentemperatur wählen bzw. mehr Heiztage abwarten.</div>';
   } else {
     keys = [VIEW];
     document.body.classList.add('single');
@@ -1139,7 +2000,39 @@ HTML;
         if ($this->ParsePeriodStart() === null) {
             return self::STATUS_BAD_PERIOD;
         }
+        $tid = $this->ReadPropertyInteger('TemperatureVariableID');
+        if ($tid > 0 && (!IPS_VariableExists($tid) || $ac <= 0 || !AC_GetLoggingStatus($ac, $tid))) {
+            return self::STATUS_BAD_TEMP;
+        }
+        $from = trim($this->ReadPropertyString('TemperatureValidFrom'));
+        if ($from !== '' && $this->ParseDate($from) === null) {
+            return self::STATUS_BAD_TEMP_FROM;
+        }
+        if ($this->IsGas() && $this->KwhFactor() <= 0) {
+            return self::STATUS_BAD_GAS;
+        }
         return 102;
+    }
+
+    private function IsGas(): bool
+    {
+        return $this->ReadPropertyInteger('MeterType') === self::METER_GAS;
+    }
+
+    /** kWh je Zählereinheit: Gas = Brennwert × Zustandszahl, sonst 1 */
+    private function KwhFactor(): float
+    {
+        if (!$this->IsGas()) {
+            return 1.0;
+        }
+        return $this->ReadPropertyFloat('CalorificValue') * $this->ReadPropertyFloat('ZNumber');
+    }
+
+    private function SetIf(string $ident, $value): void
+    {
+        if ($value !== null && @IPS_GetObjectIDByIdent($ident, $this->InstanceID) !== false) {
+            $this->SetValue($ident, $value);
+        }
     }
 
     private function IsArchivedCounter(int $ac, int $vid): bool
@@ -1207,17 +2100,37 @@ HTML;
     /** Legt die klassischen Variablenprofile an (für IPSView) und liefert den Namen des Energie-Profils */
     private function EnsureProfiles(): string
     {
-        $unit = trim($this->ReadPropertyString('Unit'));
-        $clean = preg_replace('/[^A-Za-z0-9]/', '', $unit);
-        $energy = 'EFC.Energy.' . ($clean !== '' ? $clean : 'Unit');
+        $unit   = trim($this->ReadPropertyString('Unit'));
+        $energy = 'EFC.Energy.' . $this->ProfileSuffix($unit);
 
-        $this->CreateFloatProfile($energy, 1, ' ' . $unit, 'Electricity');
+        $this->CreateFloatProfile($energy, 1, ' ' . $unit, $this->IsGas() ? 'Flame' : 'Electricity');
         $this->CreateFloatProfile('EFC.Euro', 2, ' €', 'Euro');
         $this->CreateFloatProfile('EFC.Percent', 0, ' %', 'Intensity');
         $this->CreateFloatProfile('EFC.Deviation', 1, ' %', 'Graph');
         $this->CreateFloatProfile('EFC.Watt', 0, ' W', 'Electricity');
+        if ($this->IsGas()) {
+            $this->CreateFloatProfile('EFC.Energy.kWh', 1, ' kWh', 'Flame');
+        }
+        if ($this->ReadPropertyInteger('TemperatureVariableID') > 0) {
+            $this->CreateFloatProfile('EFC.HDD', 1, ' Kd', 'Temperature');
+            $this->CreateFloatProfile('EFC.R2', 2, '', 'Graph');
+            $perUnit = $this->IsGas() ? 'kWh' : $unit;
+            $this->CreateFloatProfile($this->PerHddProfile(), 2, ' ' . $perUnit . '/Kd', 'Temperature');
+        }
 
         return $energy;
+    }
+
+    private function PerHddProfile(): string
+    {
+        $unit = $this->IsGas() ? 'kWh' : trim($this->ReadPropertyString('Unit'));
+        return 'EFC.PerHDD.' . $this->ProfileSuffix($unit);
+    }
+
+    private function ProfileSuffix(string $unit): string
+    {
+        $clean = preg_replace('/[^A-Za-z0-9]/', '', strtr($unit, ['³' => '3', '²' => '2']));
+        return $clean !== '' ? $clean : 'Unit';
     }
 
     private function CreateFloatProfile(string $name, int $digits, string $suffix, string $icon): void
