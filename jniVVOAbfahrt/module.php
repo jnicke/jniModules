@@ -16,7 +16,7 @@ declare(strict_types=1);
  * Kachel-Visualisierung über das HTML-SDK (module.html) mit sekundengenauem Countdown im Browser.
  *
  * IPSView / Browser: dieselbe Ansicht als eigenständige Seite über WebHook (Web-Control)
- *   /hook/vvo<InstanzID>?theme=dark|light&bg=<hex>|transparent&size=<px>&header=0&refresh=<s>&icons=0
+ *   /hook/vvo<InstanzID>?theme=dark|light&bg=<hex>|transparent&size=<px, Standard 20>&header=0&refresh=<s>&icons=0
  *   /hook/vvo<InstanzID>?json=1   Rohdaten der Ansicht
  */
 class jniVVOAbfahrt extends IPSModule
@@ -535,6 +535,7 @@ class jniVVOAbfahrt extends IPSModule
             'abfahrten'  => json_decode($this->GetBuffer('Abfahrten'), true) ?: [],
             'stoerungen' => $this->ReadPropertyBoolean('Stoerungen') ? (json_decode($this->GetBuffer('Stoerungen'), true) ?: []) : [],
             'stand'      => (int)$this->Lese('Datenstand', 0),
+            'intervall'  => max(30, $this->ReadPropertyInteger('Intervall')),
             'pause'      => $this->GetStatus() == 104,
             'fehler'     => $this->GetStatus() == 201 ? ($this->ReadAttributeString('Fehler') ?: 'Abruf fehlgeschlagen') : '',
         ];
@@ -569,7 +570,7 @@ class jniVVOAbfahrt extends IPSModule
         } elseif (preg_match('/^[0-9a-fA-F]{3,8}$/', $bg)) {
             $farben['bg'] = $farben['card'] = '#' . $bg;
         }
-        $groesse = min(48, max(8, (int)($_GET['size'] ?? 15)));
+        $groesse = min(48, max(8, (int)($_GET['size'] ?? 20)));
         $refresh = min(300, max(10, (int)($_GET['refresh'] ?? 20)));
         $kopf = ($_GET['header'] ?? '1') !== '0';
         $icons = ($_GET['icons'] ?? '1') !== '0';
@@ -584,10 +585,10 @@ class jniVVOAbfahrt extends IPSModule
         $html = str_replace('<script src="/icons.js"></script>', $stil, $html);
         $html = str_replace('/*DATEN*/null', json_encode($this->KachelDaten(), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG), $html);
 
-        $abruf = '<script>(function(){let fehl=0;setInterval(function(){fetch(' . json_encode($this->HookPfad() . '?json=1')
+        $abruf = '<script>(function(){let fehl=0;window.vvoAbruf=function(){fetch(' . json_encode($this->HookPfad() . '?json=1')
             . ',{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(function(d){fehl=0;handleMessage(d);})'
-            . '.catch(function(){if(++fehl>=Math.ceil(180/' . $refresh . ')&&daten){daten.fehler="Keine Verbindung zu Symcon";render();}});},'
-            . ($refresh * 1000) . ');})();</script>';
+            . '.catch(function(){if(++fehl>=Math.ceil(180/' . $refresh . ')&&daten){daten.fehler="Keine Verbindung zu Symcon";render();}});};'
+            . 'setInterval(window.vvoAbruf,' . ($refresh * 1000) . ');})();</script>';
         if ($icons) {
             $abruf .= '<script>(function(){const I=' . json_encode($this->IconPfade($html)) . ';'
                 . 'function ersetze(){document.querySelectorAll("i.fa-light:not([data-svg])").forEach(function(i){'
