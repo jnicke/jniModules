@@ -29,6 +29,7 @@
     .chips { display: flex; flex-wrap: wrap; gap: 0.35em 0.9em; flex: 0 0 auto; font-size: 0.92em; }
     .chips span { white-space: nowrap; }
     .chips i { width: 1.15em; text-align: center; opacity: 0.75; margin-right: 0.15em; }
+    .chips i.pfeil { display: inline-block; opacity: 1; color: var(--accent-color); transition: transform 0.6s ease; }
 
     /* ---------- Tage ---------- */
     .tage { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: hidden;
@@ -107,6 +108,10 @@
         if (w === null || w === undefined || w === '') return '–';
         return Number(w).toLocaleString('de-DE', { minimumFractionDigits: stellen, maximumFractionDigits: stellen });
     }
+    function rose(gradzahl) {
+        const r = ['N', 'NNO', 'NO', 'ONO', 'O', 'OSO', 'SO', 'SSO', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+        return r[Math.round(((gradzahl % 360) + 360) % 360 / 22.5) % 16];
+    }
     function grad(w) { return (w === null || w === undefined) ? '–' : Math.round(w) + '°'; }
     function el(tag, klasse, text) {
         const e = document.createElement(tag);
@@ -132,7 +137,15 @@
         const chips = document.getElementById('chips');
         chips.replaceChildren();
         const chip = (icon, text) => { const s = el('span'); s.append(el('i', 'fa-light ' + icon), document.createTextNode(text)); chips.append(s); };
-        chip('fa-wind', zahl(a.wind, 0) + ' km/h' + (a.boeen ? ' (Böen ' + zahl(a.boeen, 0) + ')' : ''));
+        chip('fa-wind', (a.richtung !== null && a.richtung !== undefined ? rose(a.richtung) + ' ' : '') +
+            zahl(a.wind, 0) + ' km/h' + (a.boeen ? ' (Böen ' + zahl(a.boeen, 0) + ')' : ''));
+        if (a.richtung !== null && a.richtung !== undefined) {
+            // Pfeil zeigt, wohin der Wind weht (Richtung + 180°)
+            const pfeil = el('i', 'fa-light fa-arrow-down pfeil');
+            pfeil.style.transform = 'rotate(' + a.richtung + 'deg)';
+            pfeil.title = 'Wind aus ' + rose(a.richtung) + ' (' + Math.round(a.richtung) + '°)';
+            chips.firstChild.firstChild.replaceWith(pfeil);
+        }
         chip('fa-droplet', zahl(a.regen, 1) + ' mm/h');
         chip('fa-cloud', zahl(a.wolken, 0) + ' %');
         if (a.uv !== null && a.uv !== undefined) chip('fa-sun-bright', 'UV ' + a.uv);

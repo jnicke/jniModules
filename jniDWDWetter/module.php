@@ -141,6 +141,8 @@ class jniDWDWetter extends IPSModule
         $this->RegisterProfile('DWDW.Sonnenschein', VARIABLETYPE_FLOAT, '', ' s', 0, 3600, 0, 0, 'Sun');
         $this->RegisterProfile('DWDW.Sonnenstunden', VARIABLETYPE_FLOAT, '', ' h', 0, 16, 0, 1, 'Sun');
         $this->RegisterProfile('DWDW.Wind', VARIABLETYPE_FLOAT, '', ' km/h', 0, 200, 0, 0, 'WindSpeed');
+        $this->RegisterProfile('DWDW.Windrichtung', VARIABLETYPE_FLOAT, '', '', 0, 360, 0, 0, 'WindDirection');
+        $this->RegisterWindrichtungen('DWDW.Windrichtung');
 
         $this->SetVisualizationType(2);   // HTML-Kachel, auch im Vollbild
     }
@@ -267,6 +269,11 @@ class jniDWDWetter extends IPSModule
                 $this->Setze($ident, $format($x));
             }
         }
+        // Windrichtung (DD, Grad, woher der Wind kommt) über den kürzeren Bogen
+        $dd = $this->Interpoliere($ts, $v['DD'] ?? [], $jetzt, true);
+        if ($dd !== null) {
+            $this->Setze('Windrichtung', fmod(round($dd), 360));
+        }
         if ($mos['issue'] > 0) {
             $this->Setze('Datenstand', $mos['issue']);
         }
@@ -345,6 +352,7 @@ class jniDWDWetter extends IPSModule
         $this->MaintainVariable('Sonnenscheindauer', 'Sonnenschein (laufende Stunde)', VARIABLETYPE_FLOAT, 'DWDW.Sonnenschein', $pos++, true);
         $this->MaintainVariable('Wind', 'Wind', VARIABLETYPE_FLOAT, 'DWDW.Wind', $pos++, true);
         $this->MaintainVariable('Windboeen', 'Windböen', VARIABLETYPE_FLOAT, 'DWDW.Wind', $pos++, true);
+        $this->MaintainVariable('Windrichtung', 'Windrichtung', VARIABLETYPE_FLOAT, 'DWDW.Windrichtung', $pos++, true);
         $this->MaintainVariable('UVIndex', 'UV-Index (Tagesmaximum)', VARIABLETYPE_INTEGER, '~UVIndex', $pos++, $this->ReadPropertyBoolean('UVOpenMeteo'));
         $this->MaintainVariable('Datenstand', 'Datenstand MOSMIX', VARIABLETYPE_INTEGER, '~UnixTimestamp', $pos++, true);
 
@@ -489,6 +497,29 @@ class jniDWDWetter extends IPSModule
             IPS_SetVariableProfileDigits($name, $stellen);
         }
         IPS_SetVariableProfileIcon($name, $icon);
+    }
+
+    /** 16-teilige Windrose als Assoziationen (Wert = Grad, woher der Wind kommt) */
+    private function RegisterWindrichtungen(string $name): void
+    {
+        $rose = ['N', 'NNO', 'NO', 'ONO', 'O', 'OSO', 'SO', 'SSO', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+        $soll = [0.0 => 'N'];
+        foreach ($rose as $i => $r) {
+            $soll[(string)($i * 22.5 + 11.25)] = $rose[($i + 1) % 16];
+        }
+        $ist = [];
+        foreach (IPS_GetVariableProfile($name)['Associations'] as $a) {
+            $ist[(string)(float)$a['Value']] = $a['Name'];
+        }
+        if ($ist == array_combine(array_map(fn($k) => (string)(float)$k, array_keys($soll)), $soll)) {
+            return;
+        }
+        foreach (array_keys($ist) as $wert) {
+            IPS_SetVariableProfileAssociation($name, (float)$wert, '', '', -1);
+        }
+        foreach ($soll as $wert => $text) {
+            IPS_SetVariableProfileAssociation($name, (float)$wert, $text, '', -1);
+        }
     }
 
     /** Wert nur bei Änderung schreiben (schont Archiv und Ereignisse) */
@@ -662,7 +693,12 @@ class jniDWDWetter extends IPSModule
     // Berechnung
     // =====================================================================
 
-    private function Interpoliere(array $ts, array $werte, int $zeit): ?float
+    /**
+     * Linear zwischen zwei Stundenwerten interpolieren.
+     * $winkel: Werte sind Richtungen in Grad – über den kürzeren Bogen interpolieren
+     * (350° → 10° ergibt 0°, nicht 180°).
+     */
+    private function Interpoliere(array $ts, array $werte, int $zeit, bool $winkel = false): ?float
     {
         $n = count($ts);
         for ($i = 0; $i < $n - 1; $i++) {
@@ -675,7 +711,12 @@ class jniDWDWetter extends IPSModule
                 if ($b === null) {
                     return $a;
                 }
-                return $a + ($b - $a) * ($zeit - $ts[$i]) / ($ts[$i + 1] - $ts[$i]);
+                $anteil = ($zeit - $ts[$i]) / ($ts[$i + 1] - $ts[$i]);
+                if ($winkel) {
+                    $diff = fmod(fmod($b - $a, 360) + 540, 360) - 180;
+                    return fmod($a + $diff * $anteil + 360, 360);
+                }
+                return $a + ($b - $a) * $anteil;
             }
         }
         if ($n && $zeit < $ts[0]) {
@@ -800,6 +841,7 @@ class jniDWDWetter extends IPSModule
                 'regen' => $this->Lese('Niederschlag'),
                 'wind'  => $this->Lese('Wind'),
                 'boeen' => $this->Lese('Windboeen'),
+                'richtung' => $this->Lese('Windrichtung'),
                 'druck' => $this->Lese('Druck'),
                 'sicht' => $this->Lese('Sichtweite'),
                 'uv'    => $this->Lese('UVIndex'),
