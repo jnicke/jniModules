@@ -1,0 +1,18 @@
+{
+    "id": "{3F9A0340-29B3-49D4-B642-A27C4AFBAEF7}",
+    "name": "jniVVOAbfahrt",
+    "type": 3,
+    "vendor": "DVB / VVO",
+    "aliases":
+    [
+        "VVO Abfahrtsmonitor",
+        "DVB Abfahrtsmonitor",
+        "Abfahrtsmonitor Dresden",
+        "jniVVOAbfahrt"
+    ],
+    "url": "https://www.vvo-online.de",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "prefix": "VVO"
+}

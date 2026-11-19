@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="/icons.js"></script>
+<style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+        font-family: inherit;
+        color: var(--content-color);
+        font-size: var(--font-size, 14px);
+        padding: var(--margin-top, 10px) var(--margin-side, 12px) var(--margin-bottom, 10px);
+        display: flex;
+        flex-direction: column;
+        gap: 0.5em;
+        -webkit-font-smoothing: antialiased;
+    }
+    .linie-trenner { border-top: 1px solid color-mix(in srgb, var(--content-color) 12%, transparent); }
+
+    /* ---------- Kopf ---------- */
+    .kopf { display: flex; align-items: center; gap: 0.6em; flex: 0 0 auto; }
+    .kopf .symbol { font-size: 1.5em; color: var(--accent-color); width: 1.2em; text-align: center; }
+    .kopf .titel { flex: 1 1 auto; min-width: 0; }
+    .kopf .name { font-weight: 600; font-size: 1.1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .kopf .ort { font-size: 0.82em; opacity: 0.62; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .kopf .fuss { font-size: 0.85em; opacity: 0.75; white-space: nowrap; }
+    .kopf .fuss i { margin-right: 0.25em; }
+
+    /* ---------- Abfahrten ---------- */
+    .liste { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+    .zeile {
+        display: grid;
+        grid-template-columns: 3em 1fr auto 3.6em;
+        align-items: center;
+        gap: 0 0.6em;
+        padding: 0.42em 0;
+        border-top: 1px solid color-mix(in srgb, var(--content-color) 12%, transparent);
+        transition: opacity 0.4s;
+    }
+    .zeile:first-child { border-top: none; }
+    .zeile.weg { opacity: 0.38; }
+    .badge {
+        display: inline-flex; align-items: center; justify-content: center; gap: 0.25em;
+        min-width: 2.6em; padding: 0.18em 0.35em; border-radius: 0.35em;
+        font-weight: 700; color: #fff; font-size: 0.95em; white-space: nowrap;
+    }
+    .badge i { font-size: 0.75em; opacity: 0.9; }
+    .m-Tram { background: #c8102e; }
+    .m-CityBus { background: #005ca9; }
+    .m-IntercityBus { background: #4f7a28; }
+    .m-SuburbanRailway { background: #00873e; }
+    .m-Train { background: #5a5a5a; }
+    .m-Ferry { background: #0098d4; }
+    .m-Cableway { background: #8a5a9e; }
+    .m-HailedSharedTaxi { background: #d98200; }
+    .ziel { min-width: 0; }
+    .ziel .text { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ziel .info { font-size: 0.8em; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ausfall .ziel .text { text-decoration: line-through; opacity: 0.6; }
+    .ausfall .ziel .info { color: #e5484d; opacity: 1; font-weight: 600; }
+    .chips { display: flex; align-items: center; gap: 0.45em; font-size: 0.82em; white-space: nowrap; }
+    .spaet { color: #e5484d; font-weight: 600; }
+    .frueh { color: #2f9e44; font-weight: 600; }
+    .voll { color: #e5484d; }
+    .min { text-align: right; font-size: 1.35em; font-weight: 300; line-height: 1; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .min small { font-size: 0.55em; margin-left: 0.1em; opacity: 0.7; }
+    .min.uhr { font-size: 1.05em; }
+    .los .min { color: var(--accent-color); font-weight: 600; }
+    .ausfall .min { text-decoration: line-through; opacity: 0.5; }
+
+    .leer { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.5em; opacity: 0.65; text-align: center; }
+    .leer i { font-size: 2em; }
+
+    /* ---------- Fuß ---------- */
+    .stoerung {
+        flex: 0 0 auto; display: flex; align-items: center; gap: 0.5em; cursor: pointer;
+        font-size: 0.85em; padding: 0.4em 0.55em; border-radius: 0.4em;
+        background: color-mix(in srgb, #f59f00 16%, transparent);
+    }
+    .stoerung i { color: #f59f00; }
+    .stoerung span { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stand { flex: 0 0 auto; font-size: 0.75em; opacity: 0.5; text-align: right; }
+    .stand.fehler { color: #e5484d; opacity: 1; }
+
+    /* ---------- Detail-Overlay Störungen ---------- */
+    .overlay {
+        position: fixed; inset: 0; display: none; flex-direction: column; gap: 0.6em;
+        padding: var(--margin-top, 10px) var(--margin-side, 12px) var(--margin-bottom, 10px);
+        background: var(--card-color, var(--background-color, #222)); overflow-y: auto; z-index: 5;
+    }
+    .overlay.offen { display: flex; }
+    .overlay .zu { align-self: flex-end; cursor: pointer; font-size: 1.2em; opacity: 0.7; }
+    .overlay .eintrag { padding-bottom: 0.6em; border-bottom: 1px solid color-mix(in srgb, var(--content-color) 12%, transparent); }
+    .overlay .eintrag b { display: block; margin-bottom: 0.2em; }
+    .overlay .eintrag .linien { font-size: 0.8em; opacity: 0.7; margin-bottom: 0.3em; }
+    .overlay .eintrag p { margin: 0; font-size: 0.85em; white-space: pre-line; opacity: 0.85; }
+</style>
+</head>
+<body>
+    <div class="kopf">
+        <i class="symbol fa-light fa-sign-hanging" id="kSymbol"></i>
+        <div class="titel">
+            <div class="name" id="kName">–</div>
+            <div class="ort" id="kOrt"></div>
+        </div>
+        <div class="fuss" id="kFuss"></div>
+    </div>
+    <ul class="liste" id="liste"></ul>
+    <div class="stoerung" id="stoerung" style="display:none"><i class="fa-light fa-triangle-exclamation"></i><span id="stoerungText"></span><i class="fa-light fa-chevron-right" style="color:inherit;opacity:.6"></i></div>
+    <div class="stand" id="stand"></div>
+
+    <div class="overlay" id="overlay">
+        <i class="fa-light fa-xmark zu" id="zu"></i>
+        <div id="overlayInhalt"></div>
+    </div>
+
+<script>
+    const START = /*DATEN*/null;
+
+    const MOT = {
+        'Tram': 'fa-train-tram',
+        'CityBus': 'fa-bus',
+        'IntercityBus': 'fa-bus-simple',
+        'SuburbanRailway': 'fa-train-subway',
+        'Train': 'fa-train',
+        'Ferry': 'fa-ferry',
+        'Cableway': 'fa-cable-car',
+        'HailedSharedTaxi': 'fa-taxi-bus'
+    };
+    const AUSLASTUNG = {
+        'FewSeats': ['fa-user-group', '', 'wenige Sitzplätze'],
+        'StandingOnly': ['fa-users', '', 'nur Stehplätze'],
+        'Full': ['fa-users', 'voll', 'voll']
+    };
+
+    let daten = START;
+    let offset = 0;   // Serverzeit - Browserzeit (ms)
+
+    function el(tag, klasse, text) {
+        const e = document.createElement(tag);
+        if (klasse) e.className = klasse;
+        if (text !== undefined) e.textContent = text;
+        return e;
+    }
+    function icon(klasse) { return el('i', 'fa-light ' + klasse); }
+    function uhr(ts) {
+        const d = new Date(ts * 1000);
+        return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    }
+    function jetzt() { return Date.now() + offset; }
+
+    function render() {
+        if (!daten) return;
+        document.getElementById('kName').textContent = daten.name || '–';
+        document.getElementById('kOrt').textContent = daten.ort || '';
+        const fuss = document.getElementById('kFuss');
+        fuss.replaceChildren();
+        if (daten.fussweg > 0) {
+            fuss.append(icon('fa-person-walking'), document.createTextNode(daten.fussweg + ' min'));
+        }
+
+        const liste = document.getElementById('liste');
+        liste.replaceChildren();
+        const n = jetzt();
+        let zeilen = 0;
+
+        if (daten.pause || daten.fehler || !daten.abfahrten || daten.abfahrten.length === 0) {
+            const leer = el('li', 'leer');
+            if (daten.pause) {
+                leer.append(icon('fa-moon'), el('div', '', 'Abfahrtsmonitor pausiert'));
+            } else if (daten.fehler && (!daten.abfahrten || daten.abfahrten.length === 0)) {
+                leer.append(icon('fa-wifi-slash'), el('div', '', 'Keine Verbindung zur VVO-Auskunft'));
+            } else if (!daten.fehler) {
+                leer.append(icon('fa-clock'), el('div', '', 'Keine Abfahrten'));
+            }
+            if (leer.childElementCount) {
+                liste.append(leer);
+            }
+        }
+
+        for (const a of (daten.pause ? [] : (daten.abfahrten || []))) {
+            const sek = (a.e * 1000 - n) / 1000;
+            if (sek < -30 && !a.a) continue;          // schon weg
+            const min = Math.max(0, Math.floor(sek / 60));
+            const unerreichbar = sek < daten.fussweg * 60;
+            if (daten.ausblenden && unerreichbar) continue;
+            const losIn = min - daten.fussweg;
+
+            const li = el('li', 'zeile');
+            if (a.a) li.classList.add('ausfall');
+            else if (unerreichbar && daten.fussweg > 0) li.classList.add('weg');
+            else if (daten.fussweg > 0 && losIn <= daten.vorlauf) li.classList.add('los');
+
+            const badge = el('span', 'badge m-' + a.m);
+            badge.append(icon(MOT[a.m] || 'fa-circle'), document.createTextNode(a.l));
+            li.append(badge);
+
+            const ziel = el('div', 'ziel');
+            ziel.append(el('div', 'text', a.z));
+            let info = [];
+            if (a.a) {
+                info.push('fällt aus' + (a.ag ? ' – ' + a.ag : ''));
+            } else {
+                if (a.s) info.push((a.m === 'Train' || a.m === 'SuburbanRailway' ? 'Gleis ' : 'Steig ') + a.s);
+                if (a.v) info.push('planm. ' + uhr(a.p));
+                if (a.v === null) info.push('ohne Echtzeit');
+            }
+            ziel.append(el('div', 'info', info.join(' · ')));
+            li.append(ziel);
+
+            const chips = el('div', 'chips');
+            if (!a.a && a.v > 0) chips.append(el('span', 'spaet', '+' + a.v));
+            if (!a.a && a.v < 0) chips.append(el('span', 'frueh', String(a.v)));
+            const o = AUSLASTUNG[a.o];
+            if (o && !a.a) {
+                const s = el('span', o[1]);
+                s.title = o[2];
+                s.append(icon(o[0]));
+                chips.append(s);
+            }
+            li.append(chips);
+
+            const m = el('div', 'min');
+            if (a.a) {
+                m.textContent = uhr(a.p);
+                m.classList.add('uhr');
+            } else if (min >= 60) {
+                m.textContent = uhr(a.e);
+                m.classList.add('uhr');
+            } else if (min === 0) {
+                m.textContent = 'jetzt';
+                m.classList.add('uhr');
+            } else {
+                m.textContent = min;
+                m.append(el('small', '', 'min'));
+            }
+            li.append(m);
+
+            liste.append(li);
+            zeilen++;
+        }
+        if (zeilen === 0 && !daten.pause && daten.abfahrten && daten.abfahrten.length > 0 && !liste.childElementCount) {
+            const leer = el('li', 'leer');
+            leer.append(icon('fa-clock'), el('div', '', 'Gleich neue Abfahrten …'));
+            liste.append(leer);
+        }
+
+        // nur ganz sichtbare Zeilen zeigen
+        const hoehe = liste.clientHeight;
+        for (const z of liste.children) {
+            if (z.classList.contains('zeile') && z.offsetTop - liste.offsetTop + z.offsetHeight > hoehe + 1) z.style.visibility = 'hidden';
+        }
+
+        // Störungen
+        const st = daten.stoerungen || [];
+        const box = document.getElementById('stoerung');
+        if (st.length > 0 && !daten.pause) {
+            box.style.display = '';
+            document.getElementById('stoerungText').textContent =
+                (st.length > 1 ? st.length + ' Meldungen: ' : '') + (st[0].l.length ? 'Linie ' + st[0].l.join(', ') + ' – ' : '') + st[0].t;
+        } else {
+            box.style.display = 'none';
+        }
+        const inhalt = document.getElementById('overlayInhalt');
+        inhalt.replaceChildren();
+        for (const s of st) {
+            const e = el('div', 'eintrag');
+            e.append(el('b', '', s.t), el('div', 'linien', 'Linie ' + s.l.join(', ')), el('p', '', s.b));
+            inhalt.append(e);
+        }
+
+        // Stand
+        const stand = document.getElementById('stand');
+        stand.classList.toggle('fehler', !!daten.fehler);
+        if (daten.fehler) {
+            stand.textContent = 'Fehler: ' + daten.fehler + (daten.stand ? ' (Daten von ' + uhr(daten.stand) + ')' : '');
+        } else {
+            stand.textContent = daten.stand ? 'Stand ' + uhr(daten.stand) + ' · VVO' : '';
+        }
+    }
+
+    function handleMessage(nachricht) {
+        try { daten = typeof nachricht === 'string' ? JSON.parse(nachricht) : nachricht; } catch (e) { return; }
+        if (daten && daten.jetzt) offset = daten.jetzt * 1000 - Date.now();
+        render();
+    }
+
+    document.getElementById('stoerung').addEventListener('click', () => document.getElementById('overlay').classList.add('offen'));
+    document.getElementById('zu').addEventListener('click', () => document.getElementById('overlay').classList.remove('offen'));
+
+    if (START) handleMessage(START);
+    setInterval(render, 10000);
+</script>
+</body>
+</html>

@@ -1,0 +1,231 @@
+{
+    "elements": [
+        {
+            "type": "ExpansionPanel",
+            "caption": "Haltestelle",
+            "expanded": true,
+            "items": [
+                {
+                    "type": "Select",
+                    "name": "StopID",
+                    "caption": "Haltestelle (über \"Haltestelle suchen\" unten wählen)",
+                    "width": "450px",
+                    "options": []
+                },
+                {
+                    "type": "Label",
+                    "caption": "Datenquelle: VVO-WebAPI (webapi.vvo-online.de), Echtzeitdaten für DVB und VVO."
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Anzeige und Filter",
+            "items": [
+                {
+                    "type": "NumberSpinner",
+                    "name": "Anzahl",
+                    "caption": "Anzahl Abfahrten",
+                    "minimum": 1,
+                    "maximum": 20
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        {
+                            "type": "CheckBox",
+                            "name": "MotTram",
+                            "caption": "Straßenbahn"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotCityBus",
+                            "caption": "Stadtbus"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotIntercityBus",
+                            "caption": "Regionalbus"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotSuburbanRailway",
+                            "caption": "S-Bahn"
+                        }
+                    ]
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        {
+                            "type": "CheckBox",
+                            "name": "MotTrain",
+                            "caption": "Zug"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotCableway",
+                            "caption": "Seil-/Schwebebahn"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotFerry",
+                            "caption": "Fähre"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "MotHailedSharedTaxi",
+                            "caption": "Rufbus/AST"
+                        }
+                    ]
+                },
+                {
+                    "type": "ValidationTextBox",
+                    "name": "Linien",
+                    "caption": "Nur Linien (kommagetrennt, leer = alle), z. B. 2, 6"
+                },
+                {
+                    "type": "ValidationTextBox",
+                    "name": "Richtungen",
+                    "caption": "Nur Richtungen (Textteil, kommagetrennt, leer = alle), z. B. Gorbitz, Wölfnitz"
+                },
+                {
+                    "type": "ValidationTextBox",
+                    "name": "Steige",
+                    "caption": "Nur Steige/Gleise (kommagetrennt, leer = alle)"
+                },
+                {
+                    "type": "CheckBox",
+                    "name": "Stoerungen",
+                    "caption": "Störungen und Baustellen der angezeigten Linien abrufen (alle 15 min)"
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Fußweg",
+            "items": [
+                {
+                    "type": "NumberSpinner",
+                    "name": "Fussweg",
+                    "caption": "Fußweg zur Haltestelle",
+                    "suffix": "min",
+                    "minimum": 0,
+                    "maximum": 60
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "Vorlauf",
+                    "caption": "\"Jetzt losgehen\" so viele Minuten vorher aktiv",
+                    "suffix": "min",
+                    "minimum": 0,
+                    "maximum": 15
+                },
+                {
+                    "type": "CheckBox",
+                    "name": "Ausblenden",
+                    "caption": "Nicht mehr erreichbare Abfahrten ausblenden"
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Aktualisierung",
+            "items": [
+                {
+                    "type": "NumberSpinner",
+                    "name": "Intervall",
+                    "caption": "Intervall",
+                    "suffix": "s",
+                    "minimum": 30,
+                    "maximum": 3600
+                },
+                {
+                    "type": "CheckBox",
+                    "name": "Zeitfenster",
+                    "caption": "Nur in folgendem Zeitfenster abrufen"
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        {
+                            "type": "SelectTime",
+                            "name": "AktivVon",
+                            "caption": "von"
+                        },
+                        {
+                            "type": "SelectTime",
+                            "name": "AktivBis",
+                            "caption": "bis"
+                        },
+                        {
+                            "type": "CheckBox",
+                            "name": "NurWerktage",
+                            "caption": "nur Mo–Fr"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "actions": [
+        {
+            "type": "RowLayout",
+            "items": [
+                {
+                    "type": "ValidationTextBox",
+                    "name": "Suchbegriff",
+                    "caption": "Haltestelle suchen",
+                    "value": ""
+                },
+                {
+                    "type": "Button",
+                    "caption": "Suchen",
+                    "onClick": "VVO_Suchen($id, $Suchbegriff);"
+                }
+            ]
+        },
+        {
+            "type": "Label",
+            "name": "Info",
+            "caption": ""
+        },
+        {
+            "type": "Button",
+            "caption": "Jetzt aktualisieren",
+            "onClick": "VVO_Update($id);"
+        },
+        {
+            "type": "Label",
+            "name": "HookInfo",
+            "caption": ""
+        }
+    ],
+    "status": [
+        {
+            "code": 102,
+            "icon": "active",
+            "caption": "Aktiv"
+        },
+        {
+            "code": 104,
+            "icon": "inactive",
+            "caption": "Pausiert (außerhalb des Zeitfensters)"
+        },
+        {
+            "code": 201,
+            "icon": "error",
+            "caption": "Abruf fehlgeschlagen"
+        },
+        {
+            "code": 202,
+            "icon": "error",
+            "caption": "Keine Haltestelle gewählt"
+        },
+        {
+            "code": 203,
+            "icon": "error",
+            "caption": "Kein Verkehrsmittel gewählt"
+        }
+    ]
+}

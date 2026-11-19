@@ -6,6 +6,7 @@ Eigene IP-Symcon-Module von jnicke.
 |---|---|
 | [jniFeiertage](#jnifeiertage) | Zeigt an, ob heute ein Feiertag ist |
 | [jniEnergyForecast](#jnienergyforecast) | Verbrauchsprognose mit Kostenrechnung und Diagrammen |
+| [jniVVOAbfahrt](#jnivvoabfahrt) | Abfahrtsmonitor für DVB/VVO-Haltestellen mit Echtzeit |
 
 ---
 
@@ -156,3 +157,59 @@ EFC_GetModelInfo(int $InstanceID);      // Heizgradtag-Modell als Text (auch But
 - Kennzahlen: witterungsbereinigt ggü. Vorjahr, Verbrauch je Heizgradtag, R²
 - Diagramme: Außentemperatur, Heizgradtage, neues Modell-Diagramm
 - Tabellen „Betrachtungszeitraum“ und „Vertragskosten“ (wie im RS-Original, neu gestaltet), Planverteilung über ±3 Tage geglättet
+
+---
+
+## jniVVOAbfahrt
+
+Abfahrtsmonitor für eine Haltestelle der DVB (Dresden) bzw. des VVO, mit Echtzeitdaten aus der
+VVO-WebAPI (`webapi.vvo-online.de`, kein API-Schlüssel nötig). Idee nach
+[dvb-browser](https://github.com/pabra/dvb-browser) von pabra und [dvbjs](https://github.com/kiliankoe/dvbjs) von kiliankoe.
+
+### Konfiguration
+
+- **Haltestelle**: unten im Formular suchen, Treffer erscheinen in der Auswahlliste (z. B. Berthold-Haupt-Straße = 33000094)
+- **Filter**: Verkehrsmittel, Linien, Richtungen (Textteil), Steige/Gleise
+- **Fußweg**: Abfahrten, die man nicht mehr schafft, werden ausgegraut oder ausgeblendet; daraus *Losgehen in* und *Jetzt losgehen*
+- **Störungen**: Baustellen/Umleitungen der Linien dieser Haltestelle (alle 15 min)
+- **Aktualisierung**: Intervall (Standard 60 s), optional nur in einem Zeitfenster und nur Mo–Fr
+
+### Variablen
+
+Nächste Linie, Nächstes Ziel, Nächste Abfahrt (Uhrzeit), Abfahrt in (min), Verspätung, Steig,
+Losgehen in (min), Jetzt losgehen, Ausfall in der Liste, Störungen / Baustellen, Datenstand.
+Die *nächste* Abfahrt ist immer die nächste **erreichbare** (Fußweg berücksichtigt) und nicht ausfallende.
+
+### Kachel
+
+HTML-SDK-Kachel im DVB-Stil: Linie, Ziel, Steig, Verspätung, Auslastung, Ausfälle (durchgestrichen mit Grund),
+Countdown läuft im Browser weiter. Ein Klick auf die Störungszeile zeigt die Meldungen im Detail.
+
+### IPSView / Browser (WebHook)
+
+Dieselbe Ansicht als eigenständige Seite, z. B. für ein **Web-Control in IPSView**:
+
+```
+http://<Symcon-IP>:3777/hook/vvo<InstanzID>
+```
+
+Optionen: `?theme=dark|light`, `&bg=<hex>|transparent`, `&size=<Schriftgröße px>` (Standard 15),
+`&header=0` (ohne Haltestellenkopf), `&refresh=<s>` (Datenabruf der Seite, Standard 20), `&icons=0`.
+Die Seite lädt nur die Daten neu (`?json=1`), ohne Flackern; der Minuten-Countdown läuft lokal weiter.
+Icons werden als SVG direkt eingebettet (die Symcon-icons.js läuft außerhalb der Visualisierung nicht).
+
+### Befehlsreferenz
+
+```php
+VVO_Update(int $InstanceID);                       // sofort abrufen
+VVO_Suchen(int $InstanceID, string $Suchbegriff);  // Haltestellen suchen, liefert JSON [{id, name, ort}]
+VVO_GetAbfahrten(int $InstanceID);                 // aktuelle Abfahrten als JSON
+```
+
+`VVO_GetAbfahrten` liefert je Abfahrt: `l` Linie, `z` Ziel, `m` Verkehrsmittel, `s` Steig, `p` Plan- und `e` Echtzeit (Unix),
+`v` Verspätung in min (`null` = keine Echtzeit), `a` Ausfall, `ag` Ausfallgrund, `o` Auslastung, `st` Status.
+
+### ChangeLog
+
+19.11.2026
+- Neu: jniVVOAbfahrt
