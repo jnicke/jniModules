@@ -73,8 +73,44 @@
     .leer { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.5em; opacity: 0.65; text-align: center; }
     .leer i { font-size: 2em; }
 
-    /* ---------- Fuß ---------- */
-    .stoerung {
+    /* ---------- Inhalt: Liste + Karte ---------- */
+    .inhalt { flex: 1 1 auto; min-height: 0; display: flex; gap: 1em; }
+    .inhalt .liste { flex: 1 1 auto; min-width: 0; }
+    .karte { position: relative; flex: 0 0 40%; min-width: 0; min-height: 8em; overflow: hidden; border-radius: 0.6em;
+             background: color-mix(in srgb, var(--content-color) 6%, transparent); }
+    @media (max-width: 560px) { .inhalt { flex-direction: column; } .karte { flex: 0 0 42%; } }
+    .kacheln, .marker { position: absolute; inset: 0; }
+    .kacheln img { position: absolute; width: 256px; height: 256px; max-width: none; user-select: none; pointer-events: none; }
+    .karte.dunkel .kacheln { filter: invert(1) hue-rotate(180deg) brightness(0.9) contrast(0.85) saturate(0.5); }
+    .karte.hell .kacheln { filter: saturate(0.6); }
+    .steig { position: absolute; transform: translate(-50%, -50%); width: 2em; height: 2em; border-radius: 50%;
+             display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff; font-size: 1em;
+             border: 2px solid #fff; box-shadow: 0 1px 4px rgba(0,0,0,0.55); z-index: 2; }
+    .steig small { position: absolute; top: 100%; left: 50%; transform: translateX(-50%); margin-top: 0.2em;
+                   font-size: 0.62em; font-weight: 600; white-space: nowrap; color: var(--content-color);
+                   text-shadow: 0 0 3px var(--card-color, #000), 0 0 3px var(--card-color, #000), 0 0 4px var(--card-color, #000); }
+    .steig.blink { z-index: 4; animation: puls 1.2s ease-in-out infinite; }
+    .steig.blink.eilig { animation-duration: 0.6s; }
+    @keyframes puls {
+        0%, 100% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 0 0 var(--accent-color); }
+        50% { transform: translate(-50%, -50%) scale(1.35); background: var(--accent-color);
+              box-shadow: 0 0 0 0.5em color-mix(in srgb, var(--accent-color) 35%, transparent); }
+    }
+    .haus { position: absolute; transform: translate(-50%, -100%); display: flex; flex-direction: column; align-items: center;
+            font-size: 0.85em; font-weight: 700; color: var(--content-color); z-index: 3;
+            text-shadow: 0 0 3px var(--card-color, #000), 0 0 3px var(--card-color, #000), 0 0 5px var(--card-color, #000); }
+    .haus i { font-size: 1.8em; color: var(--accent-color); filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
+    .haus span { position: absolute; left: 100%; top: 0.35em; margin-left: 0.3em; white-space: nowrap; }
+    .karteninfo { position: absolute; left: 0.5em; right: 0.5em; bottom: 0.5em; display: flex; align-items: center; gap: 0.55em;
+                  padding: 0.4em 0.6em; border-radius: 0.5em; font-size: 0.95em; z-index: 5;
+                  background: color-mix(in srgb, var(--card-color, #000) 85%, transparent); }
+    .karteninfo:empty { display: none; }
+    .karteninfo b { white-space: nowrap; }
+    .steig small.oben { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 0.2em; }
+    .karteninfo .text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .osm { position: absolute; right: 0.35em; top: 0.25em; font-size: 0.6em; opacity: 0.65; z-index: 5; }
+
+    /* ---------- Fuß ---------- */    .stoerung {
         flex: 0 0 auto; display: flex; align-items: center; gap: 0.5em; cursor: pointer;
         font-size: 0.85em; padding: 0.4em 0.55em; border-radius: 0.4em;
         background: color-mix(in srgb, #f59f00 16%, transparent);
@@ -110,7 +146,10 @@
         </div>
         <div class="fuss" id="kFuss"></div>
     </div>
-    <ul class="liste" id="liste"></ul>
+    <div class="inhalt">
+        <ul class="liste" id="liste"></ul>
+        <div class="karte" id="karte" style="display:none"></div>
+    </div>
     <div class="stoerung" id="stoerung" style="display:none"><i class="fa-light fa-triangle-exclamation"></i><span id="stoerungText"></span><i class="fa-light fa-chevron-right" style="color:inherit;opacity:.6"></i></div>
     <div class="stand" id="stand"></div>
     <div class="abruf"><div id="abrufBalken"></div></div>
@@ -154,15 +193,19 @@
         return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
     }
     function jetzt() { return Date.now() + offset; }
+    // Fußweg zum Steig dieser Abfahrt in s (je Steig berechnet, sonst fest)
+    function fussweg(a) { return (a && a.f !== undefined && a.f !== null) ? a.f : daten.fussweg * 60; }
+    function fwText(s) { return Math.max(1, Math.round(s / 60)) + ' min'; }
 
     function render() {
         if (!daten) return;
+        karte();
         document.getElementById('kName').textContent = daten.name || '–';
         document.getElementById('kOrt').textContent = daten.ort || '';
         const fuss = document.getElementById('kFuss');
         fuss.replaceChildren();
-        if (daten.fussweg > 0) {
-            fuss.append(icon('fa-person-walking'), document.createTextNode(daten.fussweg + ' min'));
+        if (daten.fusswegText) {
+            fuss.append(icon('fa-person-walking'), document.createTextNode(daten.fusswegText));
         }
 
         const liste = document.getElementById('liste');
@@ -188,14 +231,15 @@
             const sek = (a.e * 1000 - n) / 1000;
             if (sek < -30 && !a.a) continue;          // schon weg
             const min = Math.max(0, Math.floor(sek / 60));
-            const unerreichbar = sek < daten.fussweg * 60;
+            const fw = fussweg(a);
+            const unerreichbar = sek < fw;
             if (daten.ausblenden && unerreichbar) continue;
-            const losIn = min - daten.fussweg;
+            const losIn = Math.floor((sek - fw) / 60);
 
             const li = el('li', 'zeile');
             if (a.a) li.classList.add('ausfall');
-            else if (unerreichbar && daten.fussweg > 0) li.classList.add('weg');
-            else if (daten.fussweg > 0 && losIn <= daten.vorlauf) li.classList.add('los');
+            else if (unerreichbar && fw > 0) li.classList.add('weg');
+            else if (fw > 0 && losIn <= daten.vorlauf) li.classList.add('los');
 
             const badge = el('span', 'badge m-' + a.m);
             badge.append(icon(MOT[a.m] || 'fa-circle'), document.createTextNode(a.l));
@@ -305,8 +349,147 @@
         }
     }
 
-    function handleMessage(nachricht) {
-        try { daten = typeof nachricht === 'string' ? JSON.parse(nachricht) : nachricht; } catch (e) { return; }
+    // ---------- Karte ----------
+    let karteSchluessel = '';
+
+    function weltpixel(lat, lon, z) {
+        const n = 256 * Math.pow(2, z);
+        const s = Math.sin(lat * Math.PI / 180);
+        return [(lon + 180) / 360 * n, (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n];
+    }
+
+    // nächste Abfahrt, die nicht ausfällt und noch nicht weg ist;
+    // mit Kartenmodus "erreichbar" nur Abfahrten, die man mit dem Fußweg noch schafft
+    function naechsteAbfahrt() {
+        const n = jetzt();
+        const erreichbar = daten.karte && daten.karte.erreichbar;
+        for (const a of (daten.abfahrten || [])) {
+            if (!a.a && a.e * 1000 - n >= (erreichbar ? fussweg(a) * 1000 : 0)) return a;
+        }
+        return null;
+    }
+
+    function karte() {
+        const box = document.getElementById('karte');
+        const k = daten && daten.karte;
+        if (!k || !k.steige || k.steige.length === 0 || daten.pause) {
+            box.style.display = 'none';
+            karteSchluessel = '';
+            return;
+        }
+        box.style.display = '';
+        const w = box.clientWidth, h = box.clientHeight;
+        if (w < 60 || h < 60) return;
+        const schluessel = w + 'x' + h + JSON.stringify(k);
+        if (schluessel !== karteSchluessel) {
+            karteSchluessel = schluessel;
+            zeichneKarte(box, k, w, h);
+        }
+        markiereSteig();
+    }
+
+    function zeichneKarte(box, k, w, h) {
+        const punkte = k.steige.map(s => [s.lat, s.lon]);
+        if (k.haus) punkte.push([k.haus.lat, k.haus.lon]);
+        const rahmen = 2.6 * parseFloat(getComputedStyle(box).fontSize);   // Platz für Marker am Rand
+        let z = 19, p = [];
+        for (; z >= 15; z--) {
+            p = punkte.map(q => weltpixel(q[0], q[1], z));
+            const xs = p.map(q => q[0]), ys = p.map(q => q[1]);
+            if (Math.max(...xs) - Math.min(...xs) <= w - 2 * rahmen && Math.max(...ys) - Math.min(...ys) <= h - 3 * rahmen) break;
+        }
+        z = Math.max(15, z);
+        p = punkte.map(q => weltpixel(q[0], q[1], z));
+        const xs = p.map(q => q[0]), ys = p.map(q => q[1]);
+        const ox = (Math.max(...xs) + Math.min(...xs)) / 2 - w / 2;
+        const oy = (Math.max(...ys) + Math.min(...ys)) / 2 - h / 2 + rahmen * 0.6;   // etwas nach oben, unten liegt die Infozeile
+
+        const ebene = el('div', 'kacheln');
+        for (let tx = Math.floor(ox / 256); tx <= Math.floor((ox + w) / 256); tx++) {
+            for (let ty = Math.floor(oy / 256); ty <= Math.floor((oy + h) / 256); ty++) {
+                const img = document.createElement('img');
+                img.alt = '';
+                img.src = k.kacheln + z + '/' + tx + '/' + ty;
+                img.style.left = Math.round(tx * 256 - ox) + 'px';
+                img.style.top = Math.round(ty * 256 - oy) + 'px';
+                ebene.append(img);
+            }
+        }
+        const marker = el('div', 'marker');
+        for (const s of k.steige) {
+            const q = weltpixel(s.lat, s.lon, z);
+            const m = el('div', 'steig m-' + ((s.m && s.m[0]) || 'Tram'));
+            m.dataset.steig = s.n;
+            m.title = 'Steig ' + s.n;
+            m.style.left = Math.round(q[0] - ox) + 'px';
+            m.style.top = Math.round(q[1] - oy) + 'px';
+            m.textContent = s.n;
+            if (s.f) {
+                m.title += ' · ' + fwText(s.f) + ' Fußweg';
+                m.append(el('small', '', fwText(s.f)));
+            }
+            marker.append(m);
+        }
+        if (k.haus) {
+            const q = weltpixel(k.haus.lat, k.haus.lon, z);
+            const m = el('div', 'haus');
+            m.style.left = Math.round(q[0] - ox) + 'px';
+            m.style.top = Math.round(q[1] - oy) + 'px';
+            if (k.haus.text) m.append(el('span', '', k.haus.text));
+            m.append(icon('fa-location-dot'));
+            marker.append(m);
+        }
+        const info = el('div', 'karteninfo');
+        info.id = 'karteInfo';
+
+        // Kartenbild an das Farbschema anpassen (helle Schrift = dunkles Theme)
+        const c = (getComputedStyle(document.body).color.match(/\d+/g) || [0, 0, 0]).map(Number);
+        const dunkel = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] > 128;
+        box.classList.toggle('dunkel', dunkel);
+        box.classList.toggle('hell', !dunkel);
+        box.replaceChildren(ebene, marker, info, el('div', 'osm', '© OpenStreetMap'));
+
+        // Fußweg-Beschriftungen, die einen anderen Marker überdecken, über den eigenen Marker setzen
+        const steige = [...marker.querySelectorAll('.steig')];
+        const ueber = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+        for (const m of steige) {
+            const t = m.querySelector('small');
+            if (!t) continue;
+            const r = t.getBoundingClientRect();
+            if (steige.some(o => o !== m && ueber(r, o.getBoundingClientRect()))) t.classList.add('oben');
+        }
+    }
+
+    function markiereSteig() {
+        const a = naechsteAbfahrt();
+        let min = 0, eilig = false;
+        if (a) {
+            min = Math.max(0, Math.floor((a.e * 1000 - jetzt()) / 60000));
+            const rest = (a.e * 1000 - jetzt()) / 1000 - fussweg(a);
+            eilig = fussweg(a) > 0 && Math.floor(rest / 60) <= daten.vorlauf;
+        }
+        document.querySelectorAll('#karte .steig').forEach(m => {
+            const an = !!a && a.s !== '' && m.dataset.steig === a.s;
+            m.classList.toggle('blink', an);
+            m.classList.toggle('eilig', an && eilig);
+        });
+        const info = document.getElementById('karteInfo');
+        if (!info) return;
+        if (!a) {
+            info.replaceChildren();
+            return;
+        }
+        const b = el('span', 'badge m-' + a.m);
+        b.append(icon(MOT[a.m] || 'fa-circle'), document.createTextNode(a.l));
+        const knapp = fussweg(a) > 0 && (a.e * 1000 - jetzt()) < fussweg(a) * 1000;
+        const t = el('span', 'text', a.z + (a.s ? ' · Steig ' + a.s : '') + (knapp ? ' · kaum zu schaffen' : ''));
+        const z = el('b', '', min === 0 ? 'jetzt' : min + ' min');
+        info.replaceChildren(b, t, z);
+    }
+
+    window.addEventListener('resize', () => karte());
+
+    function handleMessage(nachricht) {        try { daten = typeof nachricht === 'string' ? JSON.parse(nachricht) : nachricht; } catch (e) { return; }
         if (daten && daten.jetzt) offset = daten.jetzt * 1000 - Date.now();
         render();
     }

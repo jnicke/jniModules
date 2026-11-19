@@ -106,12 +106,88 @@
             "caption": "Fußweg",
             "items": [
                 {
+                    "type": "Select",
+                    "name": "FusswegModus",
+                    "caption": "Fußweg",
+                    "options": [
+                        {
+                            "caption": "fest für alle Steige",
+                            "value": 0
+                        },
+                        {
+                            "caption": "je Steig aus der Entfernung zum Standort (Karte)",
+                            "value": 1
+                        }
+                    ]
+                },
+                {
                     "type": "NumberSpinner",
                     "name": "Fussweg",
-                    "caption": "Fußweg zur Haltestelle",
+                    "caption": "Fester Fußweg (auch für Steige ohne Lage)",
                     "suffix": "min",
                     "minimum": 0,
                     "maximum": 60
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        {
+                            "type": "NumberSpinner",
+                            "name": "FusswegGrund",
+                            "caption": "Grundzeit bis vor die Tür",
+                            "suffix": "s",
+                            "minimum": 0,
+                            "maximum": 900
+                        },
+                        {
+                            "type": "NumberSpinner",
+                            "name": "Gehtempo",
+                            "caption": "Gehtempo",
+                            "suffix": "km/h",
+                            "digits": 1,
+                            "minimum": 2,
+                            "maximum": 8
+                        },
+                        {
+                            "type": "NumberSpinner",
+                            "name": "Umweg",
+                            "caption": "Umwegfaktor zur Luftlinie",
+                            "digits": 2,
+                            "minimum": 1,
+                            "maximum": 3
+                        }
+                    ]
+                },
+                {
+                    "type": "List",
+                    "name": "FusswegListe",
+                    "caption": "Fußweg je Steig manuell (hat Vorrang vor der Berechnung)",
+                    "rowCount": 4,
+                    "add": true,
+                    "delete": true,
+                    "columns": [
+                        {
+                            "caption": "Steig",
+                            "name": "Steig",
+                            "width": "120px",
+                            "add": "",
+                            "edit": {
+                                "type": "ValidationTextBox"
+                            }
+                        },
+                        {
+                            "caption": "Minuten",
+                            "name": "Minuten",
+                            "width": "140px",
+                            "add": 2,
+                            "edit": {
+                                "type": "NumberSpinner",
+                                "digits": 1,
+                                "minimum": 0,
+                                "maximum": 60
+                            }
+                        }
+                    ]
                 },
                 {
                     "type": "NumberSpinner",
@@ -166,6 +242,76 @@
                     ]
                 }
             ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Karte",
+            "items": [
+                {
+                    "type": "CheckBox",
+                    "name": "Karte",
+                    "caption": "Karte mit den Steigen anzeigen (Steig der nächsten Abfahrt blinkt)"
+                },
+                {
+                    "type": "Select",
+                    "name": "KarteModus",
+                    "caption": "Blinkender Steig",
+                    "options": [
+                        {
+                            "caption": "nächste Abfahrt",
+                            "value": 0
+                        },
+                        {
+                            "caption": "nächste erreichbare Abfahrt (mit Fußweg)",
+                            "value": 1
+                        }
+                    ]
+                },
+                {
+                    "type": "CheckBox",
+                    "name": "KarteHaus",
+                    "caption": "Eigenen Standort einzeichnen, wenn näher als 600 m"
+                },
+                {
+                    "type": "ValidationTextBox",
+                    "name": "KarteHausText",
+                    "caption": "Beschriftung Standort"
+                },
+                {
+                    "type": "RowLayout",
+                    "items": [
+                        {
+                            "type": "NumberSpinner",
+                            "name": "KarteHausLat",
+                            "caption": "Breitengrad",
+                            "digits": 6,
+                            "minimum": -90,
+                            "maximum": 90
+                        },
+                        {
+                            "type": "NumberSpinner",
+                            "name": "KarteHausLon",
+                            "caption": "Längengrad",
+                            "digits": 6,
+                            "minimum": -180,
+                            "maximum": 180
+                        }
+                    ]
+                },
+                {
+                    "type": "Label",
+                    "caption": "Koordinaten leer bzw. 0 = Symcon-Standort verwenden (z. B. aus Google Maps: Rechtsklick auf den Ort)."
+                },
+                {
+                    "type": "Button",
+                    "caption": "Steige neu laden",
+                    "onClick": "echo VVO_LadeSteige($id) ? \"Steige geladen\" : \"Keine Steige gefunden\";"
+                },
+                {
+                    "type": "Label",
+                    "caption": "Steige aus der VVO-EFA, Kartenkacheln © OpenStreetMap-Mitwirkende (werden in Symcon zwischengespeichert)."
+                }
+            ]
         }
     ],
     "actions": [
@@ -188,6 +334,11 @@
         {
             "type": "Label",
             "name": "Info",
+            "caption": ""
+        },
+        {
+            "type": "Label",
+            "name": "FusswegInfo",
             "caption": ""
         },
         {

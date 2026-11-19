@@ -17,6 +17,10 @@ declare(strict_types=1);
  *
  * IPSView / Browser: dieselbe Ansicht als eigenständige Seite über WebHook (Web-Control)
  *   /hook/vvo<InstanzID>?theme=dark|light&bg=<hex>|transparent&size=<px, Standard 20>&header=0&refresh=<s>&icons=0
+ *                       &view=beide|liste|karte
+ *   /hook/vvo<InstanzID>?tile=z/x/y   OpenStreetMap-Kacheln für die Karte (zwischengespeichert, nur Umgebung der Haltestelle)
+ *
+ * Karte: Lage der Steige aus der EFA des VVO (efa.vvo-online.de, rapidJSON), täglich erneuert.
  *   /hook/vvo<InstanzID>?json=1   Rohdaten der Ansicht
  */
 class jniVVOAbfahrt extends IPSModule
@@ -37,6 +41,13 @@ class jniVVOAbfahrt extends IPSModule
 
     private const STOERUNG_INTERVALL = 900;   // s
     private const WEBHOOK_GUID = '{015A6EB8-D6E5-4B93-B496-0D3F77AE9FE1}';
+    private const LOCATION_GUID = '{45E97A63-F870-408A-B259-2933F7EABF74}';
+
+    /** EFA-Produktklasse => Verkehrsmittel wie in der WebAPI */
+    private const EFA_KLASSEN = [
+        0 => 'Train', 1 => 'SuburbanRailway', 2 => 'Train', 3 => 'Train', 4 => 'Tram', 5 => 'CityBus',
+        6 => 'IntercityBus', 7 => 'IntercityBus', 8 => 'Cableway', 9 => 'Ferry', 10 => 'HailedSharedTaxi', 11 => 'CityBus', 13 => 'Train',
+    ];
 
     public function Create()
     {
@@ -52,6 +63,11 @@ class jniVVOAbfahrt extends IPSModule
         $this->RegisterPropertyString('Steige', '');
         $this->RegisterPropertyBoolean('Stoerungen', true);
         $this->RegisterPropertyInteger('Fussweg', 3);
+        $this->RegisterPropertyInteger('FusswegModus', 0);     // 0 = fest, 1 = je Steig aus der Entfernung Standort -> Steig
+        $this->RegisterPropertyInteger('FusswegGrund', 60);    // s bis vor die Haustür
+        $this->RegisterPropertyFloat('Gehtempo', 4.5);         // km/h
+        $this->RegisterPropertyFloat('Umweg', 1.3);            // Faktor Luftlinie -> tatsächlicher Weg
+        $this->RegisterPropertyString('FusswegListe', '[]');   // [{"Steig":"4","Minuten":3.5}] überschreibt die Berechnung
         $this->RegisterPropertyInteger('Vorlauf', 1);
         $this->RegisterPropertyBoolean('Ausblenden', false);
         $this->RegisterPropertyInteger('Intervall', 60);
@@ -59,15 +75,20 @@ class jniVVOAbfahrt extends IPSModule
         $this->RegisterPropertyString('AktivVon', '{"hour":6,"minute":0,"second":0}');
         $this->RegisterPropertyString('AktivBis', '{"hour":20,"minute":0,"second":0}');
         $this->RegisterPropertyBoolean('NurWerktage', false);
+        $this->RegisterPropertyBoolean('Karte', true);
+        $this->RegisterPropertyBoolean('KarteHaus', true);
+        $this->RegisterPropertyString('KarteHausText', 'Hier');
+        $this->RegisterPropertyFloat('KarteHausLat', 0);    // 0 = Symcon-Standort verwenden
+        $this->RegisterPropertyFloat('KarteHausLon', 0);
+        $this->RegisterPropertyInteger('KarteModus', 0);   // 0 = nächste Abfahrt, 1 = nächste erreichbare (Fußweg)
 
         $this->RegisterAttributeString('Haltestelle', '{}');      // {"id","name","ort"}
         $this->RegisterAttributeString('Suchtreffer', '[]');
         $this->RegisterAttributeString('Fehler', '');
         $this->RegisterAttributeInteger('Fehlversuche', 0);
         $this->RegisterAttributeInteger('StoerungAbruf', 0);
-
-        $this->SetBuffer('Abfahrten', '[]');
-        $this->SetBuffer('Stoerungen', '[]');
+        $this->RegisterAttributeString('SteigLage', '{}');      // {"mitte":[lat,lon],"steige":{Name:{n,lat,lon,m:[...]}}}
+        $this->RegisterAttributeInteger('SteigeAbruf', 0);
 
         $this->RegisterTimer('Update', 0, 'VVO_Update($_IPS[\'TARGET\']);');
 
@@ -110,6 +131,8 @@ class jniVVOAbfahrt extends IPSModule
         if ($this->Haltestelle()['id'] !== $this->ReadPropertyString('StopID')) {
             $this->WriteAttributeString('Haltestelle', json_encode(['id' => $this->ReadPropertyString('StopID'), 'name' => '', 'ort' => '']));
             $this->WriteAttributeInteger('StoerungAbruf', 0);
+            $this->WriteAttributeString('SteigLage', '{}');
+            $this->WriteAttributeInteger('SteigeAbruf', 0);
             $this->SetBuffer('Abfahrten', '[]');
             $this->SetBuffer('Stoerungen', '[]');
         }
@@ -174,6 +197,9 @@ class jniVVOAbfahrt extends IPSModule
         foreach ($form['actions'] as &$a) {
             if (($a['name'] ?? '') === 'Info') {
                 $a['caption'] = $this->InfoText();
+            }
+            if (($a['name'] ?? '') === 'FusswegInfo') {
+                $a['caption'] = $this->FusswegInfo();
             }
             if (($a['name'] ?? '') === 'HookInfo') {
                 $a['caption'] = 'IPSView Web-Control / Browser: http://<Symcon-IP>:3777' . $this->HookPfad()
@@ -319,9 +345,13 @@ class jniVVOAbfahrt extends IPSModule
         usort($liste, fn($x, $y) => $x['e'] <=> $y['e']);
 
         $jetzt = time();
-        $fussweg = $this->ReadPropertyInteger('Fussweg') * 60;
+        $wege = $this->Fusswege();
+        foreach ($liste as &$a) {
+            $a['f'] = $this->FusswegSek($wege, $a['s']);   // Fußweg zu diesem Steig in s
+        }
+        unset($a);
         if ($this->ReadPropertyBoolean('Ausblenden')) {
-            $liste = array_values(array_filter($liste, fn($a) => $a['e'] - $jetzt >= $fussweg));
+            $liste = array_values(array_filter($liste, fn($a) => $a['e'] - $jetzt >= $a['f']));
         }
         $liste = array_slice($liste, 0, $anzahl);
 
@@ -332,9 +362,81 @@ class jniVVOAbfahrt extends IPSModule
         }
 
         $this->SchreibeVariablen($liste);
+        $alter = $jetzt - $this->ReadAttributeInteger('SteigeAbruf');
+        if ($this->ReadPropertyBoolean('Karte') && ($alter > 86400 || ($this->ReadAttributeString('SteigLage') === '{}' && $alter > 3600))) {
+            $this->LadeSteige();
+        }
         $this->Setze('Datenstand', $jetzt);
         $this->AktualisiereKachel();
         return true;
+    }
+
+    /**
+     * Lage der Steige aus der EFA des VVO (für die Karte), wird täglich erneuert.
+     * VVO_LadeSteige($InstanzID);
+     */
+    public function LadeSteige(): bool
+    {
+        if (!$this->StopGueltig()) {
+            return false;
+        }
+        $url = 'https://efa.vvo-online.de/std3/trigger/XML_DM_REQUEST?' . http_build_query([
+            'outputFormat'      => 'rapidJSON',
+            'coordOutputFormat' => 'WGS84[dd.ddddd]',
+            'type_dm'           => 'stop',
+            'name_dm'           => $this->ReadPropertyString('StopID'),
+            'mode'              => 'direct',
+            'useRealtime'       => 1,
+            'limit'             => 60,
+            'depType'           => 'stopEvents',
+        ]);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_USERAGENT      => 'IP-Symcon jniVVOAbfahrt',
+        ]);
+        $antwort = curl_exec($ch);
+        $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        $j = ($antwort !== false && $http == 200) ? json_decode($antwort, true) : null;
+        if (!is_array($j) || empty($j['stopEvents'])) {
+            $this->WriteAttributeInteger('SteigeAbruf', time());   // ohne Steige stündlich, sonst morgen erneut versuchen
+            $this->SendDebug('Steige', 'EFA ohne Ergebnis (HTTP ' . $http . ')', 0);
+            return false;
+        }
+
+        $alt = json_decode($this->ReadAttributeString('SteigLage'), true) ?: [];
+        $steige = $alt['steige'] ?? [];
+        foreach ($j['stopEvents'] as $e) {
+            $l = $e['location'] ?? [];
+            $n = (string)($l['properties']['platform'] ?? $l['properties']['platformName'] ?? '');
+            if ($n === '' || !isset($l['coord'][0], $l['coord'][1])) {
+                continue;
+            }
+            $m = self::EFA_KLASSEN[(int)($e['transportation']['product']['class'] ?? -1)] ?? '';
+            $s = $steige[$n] ?? ['n' => $n, 'm' => []];
+            $s['lat'] = round((float)$l['coord'][0], 6);
+            $s['lon'] = round((float)$l['coord'][1], 6);
+            if ($m !== '' && !in_array($m, $s['m'], true)) {
+                $s['m'][] = $m;
+            }
+            $steige[$n] = $s;
+        }
+        uksort($steige, 'strnatcmp');
+        $mitte = $j['locations'][0]['coord'] ?? null;
+        if (!isset($mitte[0], $mitte[1]) && count($steige) > 0) {
+            $mitte = [array_sum(array_column($steige, 'lat')) / count($steige), array_sum(array_column($steige, 'lon')) / count($steige)];
+        }
+        $this->WriteAttributeString('SteigLage', json_encode([
+            'mitte'  => $mitte ? [(float)$mitte[0], (float)$mitte[1]] : null,
+            'steige' => $steige,
+        ], JSON_UNESCAPED_UNICODE));
+        $this->WriteAttributeInteger('SteigeAbruf', time());
+        $this->SendDebug('Steige', count($steige) . ' Steige: ' . implode(', ', array_keys($steige)), 0);
+        return count($steige) > 0;
     }
 
     /**
@@ -420,10 +522,10 @@ class jniVVOAbfahrt extends IPSModule
     private function SchreibeVariablen(array $liste): void
     {
         $jetzt = time();
-        $fussweg = $this->ReadPropertyInteger('Fussweg');
+        $fest = $this->ReadPropertyInteger('Fussweg') * 60;
         $naechste = null;
         foreach ($liste as $a) {
-            if (!$a['a'] && $a['e'] - $jetzt >= $fussweg * 60) {
+            if (!$a['a'] && $a['e'] - $jetzt >= ($a['f'] ?? $fest)) {
                 $naechste = $a;
                 break;
             }
@@ -440,7 +542,7 @@ class jniVVOAbfahrt extends IPSModule
             $this->Setze('JetztLosgehen', false);
         } else {
             $min = intdiv(max(0, $naechste['e'] - $jetzt), 60);
-            $los = max(0, $min - $fussweg);
+            $los = intdiv(max(0, $naechste['e'] - $jetzt - ($naechste['f'] ?? $fest)), 60);
             $this->Setze('Linie', $naechste['l']);
             $this->Setze('Ziel', $naechste['z']);
             $this->Setze('Abfahrt', $naechste['e']);
@@ -461,7 +563,7 @@ class jniVVOAbfahrt extends IPSModule
     /** Störungen/Baustellen aus /rc für die Linien der aktuellen Abfahrten (höchstens alle 15 min) */
     private function LadeStoerungen(array $divas): void
     {
-        if (time() - $this->ReadAttributeInteger('StoerungAbruf') < self::STOERUNG_INTERVALL) {
+        if ($this->GetBuffer('Stoerungen') !== '' && time() - $this->ReadAttributeInteger('StoerungAbruf') < self::STOERUNG_INTERVALL) {
             return;
         }
         $r = $this->Api('rc', ['shortterm' => true]);
@@ -530,15 +632,140 @@ class jniVVOAbfahrt extends IPSModule
             'ort'        => $h['ort'],
             'jetzt'      => time(),
             'fussweg'    => $this->ReadPropertyInteger('Fussweg'),
+            'fusswegText' => $this->FusswegText(),
             'vorlauf'    => $this->ReadPropertyInteger('Vorlauf'),
             'ausblenden' => $this->ReadPropertyBoolean('Ausblenden'),
             'abfahrten'  => json_decode($this->GetBuffer('Abfahrten'), true) ?: [],
             'stoerungen' => $this->ReadPropertyBoolean('Stoerungen') ? (json_decode($this->GetBuffer('Stoerungen'), true) ?: []) : [],
             'stand'      => (int)$this->Lese('Datenstand', 0),
             'intervall'  => max(30, $this->ReadPropertyInteger('Intervall')),
+            'karte'      => $this->KartenDaten(),
             'pause'      => $this->GetStatus() == 104,
             'fehler'     => $this->GetStatus() == 201 ? ($this->ReadAttributeString('Fehler') ?: 'Abruf fehlgeschlagen') : '',
         ];
+    }
+
+    private function KartenDaten(): ?array
+    {
+        if (!$this->ReadPropertyBoolean('Karte')) {
+            return null;
+        }
+        $k = json_decode($this->ReadAttributeString('SteigLage'), true) ?: [];
+        if (empty($k['steige'])) {
+            return null;
+        }
+        $steige = array_values($k['steige']);
+        $haus = null;
+        $wege = $this->Fusswege();
+        foreach ($steige as &$s) {
+            $s['f'] = $this->FusswegSek($wege, (string)$s['n']);
+        }
+        unset($s);
+        $pos = $this->ReadPropertyBoolean('KarteHaus') ? $this->HausPosition() : null;
+        if ($pos !== null) {
+            $ref = $k['mitte'] ?? [$steige[0]['lat'], $steige[0]['lon']];
+            if ($this->Abstand((float)$ref[0], (float)$ref[1], $pos[0], $pos[1]) <= 600) {
+                $haus = ['lat' => $pos[0], 'lon' => $pos[1], 'text' => $this->ReadPropertyString('KarteHausText')];
+            }
+        }
+        return [
+            'steige'     => $steige,
+            'haus'       => $haus,
+            'erreichbar' => $this->ReadPropertyInteger('KarteModus') == 1,
+            'kacheln'    => $this->HookPfad() . '?tile=',
+        ];
+    }
+
+    /** eigener Standort: Koordinaten aus der Konfiguration, sonst Symcon-Standort */
+    private function HausPosition(): ?array
+    {
+        $lat = $this->ReadPropertyFloat('KarteHausLat');
+        $lon = $this->ReadPropertyFloat('KarteHausLon');
+        if ($lat == 0.0 || $lon == 0.0) {
+            $ids = IPS_GetInstanceListByModuleID(self::LOCATION_GUID);
+            $loc = count($ids) > 0 ? json_decode(IPS_GetProperty($ids[0], 'Location'), true) : null;
+            $lat = (float)($loc['latitude'] ?? 0);
+            $lon = (float)($loc['longitude'] ?? 0);
+        }
+        return ($lat != 0.0 && $lon != 0.0) ? [$lat, $lon] : null;
+    }
+
+    /**
+     * Fußweg in Sekunden je Steig, Schlüssel '*' = für Steige ohne eigenen Wert.
+     * Modus "je Steig": Grundzeit + Luftlinie Standort -> Steig × Umwegfaktor / Gehtempo,
+     * Einträge der Tabelle "Fußweg je Steig" haben Vorrang.
+     */
+    private function Fusswege(): array
+    {
+        $wege = ['*' => $this->ReadPropertyInteger('Fussweg') * 60];
+        if ($this->ReadPropertyInteger('FusswegModus') != 1) {
+            return $wege;
+        }
+        $haus = $this->HausPosition();
+        $k = json_decode($this->ReadAttributeString('SteigLage'), true) ?: [];
+        $tempo = max(1.0, $this->ReadPropertyFloat('Gehtempo')) / 3.6;   // m/s
+        $umweg = max(1.0, $this->ReadPropertyFloat('Umweg'));
+        $grund = max(0, $this->ReadPropertyInteger('FusswegGrund'));
+        if ($haus !== null) {
+            foreach ($k['steige'] ?? [] as $n => $s) {
+                $meter = $this->Abstand($haus[0], $haus[1], (float)$s['lat'], (float)$s['lon']);
+                $wege[(string)$n] = (int)round($grund + $meter * $umweg / $tempo);
+            }
+        }
+        foreach (json_decode($this->ReadPropertyString('FusswegListe'), true) ?: [] as $z) {
+            $n = trim((string)($z['Steig'] ?? ''));
+            if ($n !== '' && is_numeric($z['Minuten'] ?? null)) {
+                $wege[$n] = (int)round((float)$z['Minuten'] * 60);
+            }
+        }
+        return $wege;
+    }
+
+    private function FusswegSek(array $wege, string $steig): int
+    {
+        return $wege[$steig] ?? $wege['*'];
+    }
+
+    /** "3 min" bzw. Spanne "1–3 min" für die Kopfzeile */
+    private function FusswegText(): string
+    {
+        $wege = $this->Fusswege();
+        if (count($wege) > 1) {
+            unset($wege['*']);
+        }
+        $min = array_map(fn($s) => max(1, (int)round($s / 60)), array_filter($wege, fn($s) => $s > 0));
+        if (count($min) == 0) {
+            return '';
+        }
+        return min($min) == max($min) ? min($min) . ' min' : min($min) . '–' . max($min) . ' min';
+    }
+
+    /** Übersicht für das Formular: Fußweg je Steig */
+    private function FusswegInfo(): string
+    {
+        $wege = $this->Fusswege();
+        if ($this->ReadPropertyInteger('FusswegModus') != 1) {
+            return 'Fußweg fest: ' . round($wege['*'] / 60) . ' min für alle Steige';
+        }
+        unset($wege['*']);
+        if (count($wege) == 0) {
+            return 'Fußweg je Steig: keine Steige/kein Standort bekannt – es gilt der feste Fußweg';
+        }
+        uksort($wege, 'strnatcmp');
+        $teile = [];
+        foreach ($wege as $n => $s) {
+            $teile[] = 'Steig ' . $n . ': ' . intdiv($s, 60) . ':' . str_pad((string)($s % 60), 2, '0', STR_PAD_LEFT) . ' min';
+        }
+        return 'Fußweg je Steig: ' . implode(', ', $teile);
+    }
+
+    /** Entfernung in Metern (Haversine) */
+    private function Abstand(float $lat1, float $lon1, float $lat2, float $lon2): float
+    {
+        $dLat = deg2rad($lat2 - $lat1);
+        $dLon = deg2rad($lon2 - $lon1);
+        $a = sin($dLat / 2) ** 2 + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon / 2) ** 2;
+        return 2 * 6371000 * asin(min(1, sqrt($a)));
     }
 
     private function AktualisiereKachel(): void
@@ -552,6 +779,10 @@ class jniVVOAbfahrt extends IPSModule
 
     protected function ProcessHookData()
     {
+        if (isset($_GET['tile'])) {
+            $this->LiefereKachel((string)$_GET['tile']);
+            return;
+        }
         if (isset($_GET['json'])) {
             header('Content-Type: application/json; charset=utf-8');
             header('Cache-Control: no-store');
@@ -574,12 +805,15 @@ class jniVVOAbfahrt extends IPSModule
         $refresh = min(300, max(10, (int)($_GET['refresh'] ?? 20)));
         $kopf = ($_GET['header'] ?? '1') !== '0';
         $icons = ($_GET['icons'] ?? '1') !== '0';
+        $ansicht = (string)($_GET['view'] ?? 'beide');
 
         $stil = '<style>:root{--content-color:' . $farben['text'] . ';--accent-color:' . $farben['accent']
             . ';--card-color:' . $farben['card'] . ';--font-size:' . $groesse . 'px;}'
             . 'html,body{background:' . $farben['bg'] . ';font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}'
             . ($kopf ? '' : '.kopf{display:none!important;}')
             . ($icons ? '' : '.fa-light{display:none!important;}')
+            . ($ansicht === 'karte' ? '.liste{display:none!important;}.karte{flex:1 1 auto!important;}' : '')
+            . ($ansicht === 'liste' ? '.karte{display:none!important;}' : '')
             . '</style>';
         $html = file_get_contents(__DIR__ . '/module.html');
         $html = str_replace('<script src="/icons.js"></script>', $stil, $html);
@@ -604,18 +838,65 @@ class jniVVOAbfahrt extends IPSModule
         echo $html;
     }
 
+    /** OpenStreetMap-Kachel aus dem Zwischenspeicher liefern (30 Tage), nur rund um die Haltestelle */
+    private function LiefereKachel(string $pfad): void
+    {
+        $k = json_decode($this->ReadAttributeString('SteigLage'), true) ?: [];
+        $ref = $k['mitte'] ?? null;
+        if ($ref === null || !preg_match('#^(\d{1,2})/(\d{1,7})/(\d{1,7})$#', $pfad, $m)) {
+            header('HTTP/1.1 404 Not Found');
+            return;
+        }
+        [$z, $x, $y] = [(int)$m[1], (int)$m[2], (int)$m[3]];
+        $n = 2 ** $z;
+        $rx = (int)floor(($ref[1] + 180) / 360 * $n);
+        $ry = (int)floor((1 - log(tan(deg2rad($ref[0])) + 1 / cos(deg2rad($ref[0]))) / M_PI) / 2 * $n);
+        if ($z < 14 || $z > 19 || abs($x - $rx) > 4 || abs($y - $ry) > 4) {
+            header('HTTP/1.1 404 Not Found');
+            return;
+        }
+        $verzeichnis = IPS_GetKernelDir() . 'jniVVOAbfahrt' . DIRECTORY_SEPARATOR . 'kacheln' . DIRECTORY_SEPARATOR;
+        if (!is_dir($verzeichnis)) {
+            @mkdir($verzeichnis, 0777, true);
+        }
+        $datei = $verzeichnis . $z . '_' . $x . '_' . $y . '.png';
+        if (!is_file($datei) || filemtime($datei) < time() - 30 * 86400) {
+            $ch = curl_init('https://tile.openstreetmap.org/' . $z . '/' . $x . '/' . $y . '.png');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_CONNECTTIMEOUT => 5,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_USERAGENT      => 'IP-Symcon jniVVOAbfahrt (+https://github.com/jnicke/jniModules)',
+            ]);
+            $png = curl_exec($ch);
+            $http = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if (is_string($png) && $http == 200 && substr($png, 0, 4) === "\x89PNG") {
+                file_put_contents($datei, $png);
+            }
+        }
+        if (!is_file($datei)) {
+            header('HTTP/1.1 404 Not Found');
+            return;
+        }
+        header('Content-Type: image/png');
+        header('Cache-Control: max-age=604800');
+        echo file_get_contents($datei);
+    }
+
     /**
      * SVG-Pfade der in module.html verwendeten Font-Awesome-Icons aus der Symcon-icons.js
      * (icons.js selbst läuft außerhalb der Symcon-Visualisierung nicht). Ergebnis im Puffer.
      */
     private function IconPfade(string $html): array
     {
-        $cache = json_decode($this->GetBuffer('Icons'), true);
-        if (is_array($cache) && count($cache) > 0) {
-            return $cache;
-        }
         preg_match_all('/fa-([a-z0-9-]+)/', $html, $m);
-        $namen = array_diff(array_unique($m[1]), ['light', 'family', 'style']);
+        $namen = array_values(array_diff(array_unique($m[1]), ['light', 'family', 'style']));
+        $schluessel = md5(implode(',', $namen));
+        $cache = json_decode($this->GetBuffer('Icons'), true);
+        if (is_array($cache) && ($cache['k'] ?? '') === $schluessel) {
+            return $cache['p'];
+        }
 
         $ch = curl_init('http://127.0.0.1:3777/icons.js');
         curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
@@ -630,7 +911,7 @@ class jniVVOAbfahrt extends IPSModule
             }
         }
         if (count($pfade) > 0) {
-            $this->SetBuffer('Icons', json_encode($pfade));
+            $this->SetBuffer('Icons', json_encode(['k' => $schluessel, 'p' => $pfade]));
         }
         return $pfade;
     }

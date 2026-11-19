@@ -170,7 +170,10 @@ VVO-WebAPI (`webapi.vvo-online.de`, kein API-Schlüssel nötig). Idee nach
 
 - **Haltestelle**: unten im Formular suchen, Treffer erscheinen in der Auswahlliste (z. B. Berthold-Haupt-Straße = 33000094)
 - **Filter**: Verkehrsmittel, Linien, Richtungen (Textteil), Steige/Gleise
-- **Fußweg**: Abfahrten, die man nicht mehr schafft, werden ausgegraut oder ausgeblendet; daraus *Losgehen in* und *Jetzt losgehen*
+- **Fußweg**: fest oder **je Steig** aus der Entfernung Standort → Steig (Grundzeit bis vor die Tür + Luftlinie × Umwegfaktor / Gehtempo,
+  Standard 60 s, 1,3, 4,5 km/h); einzelne Steige lassen sich in der Tabelle *Fußweg je Steig* manuell festlegen.
+  Abfahrten, die man nicht mehr schafft, werden ausgegraut oder ausgeblendet; daraus *Losgehen in* und *Jetzt losgehen*.
+  Die berechneten Zeiten stehen unten im Formular und an den Steigen auf der Karte.
 - **Störungen**: Baustellen/Umleitungen der Linien dieser Haltestelle (alle 15 min)
 - **Aktualisierung**: Intervall (Standard 60 s), optional nur in einem Zeitfenster und nur Mo–Fr
 
@@ -185,6 +188,18 @@ Die *nächste* Abfahrt ist immer die nächste **erreichbare** (Fußweg berücksi
 HTML-SDK-Kachel im DVB-Stil: Linie, Ziel, Steig, Verspätung, Auslastung, Ausfälle (durchgestrichen mit Grund),
 Countdown läuft im Browser weiter. Ein Klick auf die Störungszeile zeigt die Meldungen im Detail.
 
+### Karte
+
+Kleine Karte mit den Steigen der Haltestelle (rechts neben der Liste, bei schmaler Ansicht darunter):
+
+- Lage der Steige aus der EFA des VVO (`efa.vvo-online.de`, täglich erneuert, Button *Steige neu laden*)
+- Steig der **nächsten Abfahrt blinkt** (wahlweise der nächsten *erreichbaren* mit Fußweg), schneller sobald *Jetzt losgehen* gilt
+  bzw. die Abfahrt kaum noch zu schaffen ist; darunter Linie, Ziel, Steig und Minuten
+- Farbe der Steige nach Verkehrsmittel (Straßenbahn rot, Bus blau …)
+- optional der eigene Standort mit Beschriftung (wenn näher als 600 m): eigene Koordinaten oder, wenn leer, die Symcon-Standort-Instanz
+- Kartenbild: OpenStreetMap-Kacheln über den WebHook (`?tile=z/x/y`), 30 Tage in `<Symcon>/jniVVOAbfahrt/kacheln/` zwischengespeichert,
+  nur für die Umgebung der Haltestelle; im dunklen Theme automatisch invertiert. Kartendaten © OpenStreetMap-Mitwirkende.
+
 ### IPSView / Browser (WebHook)
 
 Dieselbe Ansicht als eigenständige Seite, z. B. für ein **Web-Control in IPSView**:
@@ -194,7 +209,8 @@ http://<Symcon-IP>:3777/hook/vvo<InstanzID>
 ```
 
 Optionen: `?theme=dark|light`, `&bg=<hex>|transparent`, `&size=<Schriftgröße px>` (Standard 15),
-`&header=0` (ohne Haltestellenkopf), `&refresh=<s>` (Datenabruf der Seite, Standard 20), `&icons=0`.
+`&header=0` (ohne Haltestellenkopf), `&refresh=<s>` (Datenabruf der Seite, Standard 20), `&icons=0`,
+`&view=beide|liste|karte` (z. B. Liste und Karte in zwei getrennten Web-Controls).
 Die Seite lädt nur die Daten neu (`?json=1`), ohne Flackern; der Minuten-Countdown läuft lokal weiter.
 Icons werden als SVG direkt eingebettet (die Symcon-icons.js läuft außerhalb der Visualisierung nicht).
 
@@ -204,12 +220,16 @@ Icons werden als SVG direkt eingebettet (die Symcon-icons.js läuft außerhalb d
 VVO_Update(int $InstanceID);                       // sofort abrufen
 VVO_Suchen(int $InstanceID, string $Suchbegriff);  // Haltestellen suchen, liefert JSON [{id, name, ort}]
 VVO_GetAbfahrten(int $InstanceID);                 // aktuelle Abfahrten als JSON
+VVO_LadeSteige(int $InstanceID);                   // Lage der Steige für die Karte neu laden
 ```
 
 `VVO_GetAbfahrten` liefert je Abfahrt: `l` Linie, `z` Ziel, `m` Verkehrsmittel, `s` Steig, `p` Plan- und `e` Echtzeit (Unix),
-`v` Verspätung in min (`null` = keine Echtzeit), `a` Ausfall, `ag` Ausfallgrund, `o` Auslastung, `st` Status.
+`v` Verspätung in min (`null` = keine Echtzeit), `a` Ausfall, `ag` Ausfallgrund, `o` Auslastung, `st` Status, `f` Fußweg zum Steig in s.
 
 ### ChangeLog
 
 19.11.2026
 - Neu: jniVVOAbfahrt
+- Countdown bis zum nächsten Abruf, größere Schrift in der WebHook-Ansicht
+- Karte mit den Steigen, blinkender Steig der nächsten Abfahrt, eigener Standort
+- Fußweg je Steig aus der Entfernung zum Standort (mit manueller Korrektur je Steig)
