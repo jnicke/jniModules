@@ -141,15 +141,27 @@ class jniPegelstand extends IPSModule
             $this->SetValue('Alarmstufe', $this->CalculateAlarmLevel($current));
         }
 
-        // Tendenz aus der Zeitreihe der letzten Stunden
+        // Zeitreihe: mindestens 25 Stunden für die Änderung über 24 Stunden, sonst der Tendenz-Zeitraum
         $hours = max(1, $this->ReadPropertyInteger('TrendHours'));
-        $measurements = $this->ApiGet('stations/' . $enc . '/W/measurements.json?start=PT' . $hours . 'H', $httpCode);
+        $fetchHours = max($hours, 25);
+        $measurements = $this->ApiGet('stations/' . $enc . '/W/measurements.json?start=PT' . $fetchHours . 'H', $httpCode);
         if (is_array($measurements)) {
-            $rate = $this->CalculateRate($measurements);
+            $points = $this->ParseMeasurements($measurements);
+            $now = ($ts !== false) ? $ts : time();
+
+            // Tendenz und Änderungsrate aus den Messwerten des Tendenz-Zeitraums
+            $trendPoints = array_values(array_filter($points, static function ($p) use ($now, $hours) {
+                return $p[0] >= $now - $hours * 3600;
+            }));
+            $rate = $this->CalculateRate($trendPoints);
             if ($rate !== null) {
                 $this->SetValue('Aenderung', round($rate, 1));
                 $this->SetValue('Tendenz', $this->RateToTrend($rate, $hours));
             }
+
+            // Änderung gegenüber dem Wert vor 1 bzw. 24 Stunden
+            $this->SetValue('Aenderung1h', $current - $this->ValueAt($points, $now - 3600, $current));
+            $this->SetValue('Aenderung24h', $current - $this->ValueAt($points, $now - 86400, $current));
         } else {
             $this->SendDebug('Update', 'Messwerte für Tendenz nicht abrufbar', 0);
         }
@@ -199,10 +211,10 @@ class jniPegelstand extends IPSModule
     // ------------------------------------------------------------------
 
     /**
-     * Steigung der Regressionsgeraden in cm/h.
-     * Erwartet [['timestamp' => ISO8601, 'value' => float], ...]
+     * Wandelt die API-Antwort [['timestamp' => ISO8601, 'value' => float], ...]
+     * in zeitlich sortierte Punkte [[Unix-Zeit, Wert], ...] um.
      */
-    private function CalculateRate(array $measurements): ?float
+    private function ParseMeasurements(array $measurements): array
     {
         $points = [];
         foreach ($measurements as $m) {
@@ -213,16 +225,46 @@ class jniPegelstand extends IPSModule
             if ($t === false) {
                 continue;
             }
-            $points[] = [$t / 3600.0, (float) $m['value']];
+            $points[] = [$t, (float) $m['value']];
         }
+        usort($points, static function ($a, $b) {
+            return $a[0] <=> $b[0];
+        });
+        return $points;
+    }
 
+    /**
+     * Wert, der zum Zeitpunkt $time gültig war: letzter Messwert bis einschließlich $time,
+     * sonst der älteste vorhandene Wert, ohne Werte $fallback (ergibt Änderung 0).
+     */
+    private function ValueAt(array $points, int $time, float $fallback): float
+    {
+        $value = null;
+        foreach ($points as [$t, $v]) {
+            if ($t > $time) {
+                break;
+            }
+            $value = $v;
+        }
+        if ($value === null) {
+            $value = count($points) > 0 ? $points[0][1] : $fallback;
+        }
+        return $value;
+    }
+
+    /**
+     * Steigung der Regressionsgeraden in cm/h über die Punkte [[Unix-Zeit, Wert], ...].
+     */
+    private function CalculateRate(array $points): ?float
+    {
         $n = count($points);
         if ($n < 2) {
             return null;
         }
 
         $sx = $sy = $sxx = $sxy = 0.0;
-        foreach ($points as [$x, $y]) {
+        foreach ($points as [$t, $y]) {
+            $x = $t / 3600.0;
             $sx += $x;
             $sy += $y;
             $sxx += $x * $x;
@@ -397,6 +439,8 @@ class jniPegelstand extends IPSModule
         $this->RegisterVariableFloat('Pegelaktuell', $this->Translate('Pegelstand aktuell'), 'PGL.Pegelstand', 0);
         $this->RegisterVariableInteger('Tendenz', $this->Translate('Tendenz'), 'PGL.Tendenz', 1);
         $this->RegisterVariableFloat('Aenderung', $this->Translate('Änderung'), 'PGL.Rate', 2);
+        $this->RegisterVariableFloat('Aenderung1h', $this->Translate('Änderung 1 Stunde'), 'PGL.Differenz', 3);
+        $this->RegisterVariableFloat('Aenderung24h', $this->Translate('Änderung 24 Stunden'), 'PGL.Differenz', 3);
         $this->RegisterVariableInteger('Messzeitpunkt', $this->Translate('Messzeitpunkt'), '~UnixTimestamp', 4);
         $this->RegisterVariableInteger('StatusMnwMhw', $this->Translate('Status (MNW/MHW)'), 'PGL.Status', 5);
         $this->RegisterVariableInteger('StatusNswHsw', $this->Translate('Status Schifffahrt (NSW/HSW)'), 'PGL.Status', 6);
@@ -407,7 +451,17 @@ class jniPegelstand extends IPSModule
     {
         $this->EnsureProfile('PGL.Pegelstand', VARIABLETYPE_FLOAT, 'Wave', '', ' cm', 0, 0, 0, 0, []);
         $this->EnsureProfile('PGL.Abfluss', VARIABLETYPE_FLOAT, 'Drops', '', ' m³/s', 0, 0, 0, 1, []);
-        $this->EnsureProfile('PGL.Rate', VARIABLETYPE_FLOAT, 'Graph', '', ' cm/h', 0, 0, 0, 1, []);
+        // Änderungen mit Vorzeichen und Farbe: fallend blau, gleich neutral, steigend orange
+        $this->EnsureProfile('PGL.Rate', VARIABLETYPE_FLOAT, 'Graph', '', ' cm/h', 0, 0, 0, 1, [
+            [-100000, '%.1f', 'HollowArrowDown', 0x3399FF],
+            [-0.05, '%.1f', 'HollowArrowRight', -1],
+            [0.05, '+%.1f', 'HollowArrowUp', 0xFF9900],
+        ]);
+        $this->EnsureProfile('PGL.Differenz', VARIABLETYPE_FLOAT, 'Graph', '', ' cm', 0, 0, 0, 0, [
+            [-100000, '%.0f', 'HollowArrowDown', 0x3399FF],
+            [-0.5, '%.0f', 'HollowArrowRight', -1],
+            [0.5, '+%.0f', 'HollowArrowUp', 0xFF9900],
+        ]);
         $this->EnsureProfile('PGL.Tendenz', VARIABLETYPE_INTEGER, 'Graph', '', '', -1, 1, 1, 0, [
             [-1, $this->Translate('fallend'), 'HollowArrowDown', -1],
             [0, $this->Translate('gleichbleibend'), 'HollowArrowRight', -1],

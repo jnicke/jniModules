@@ -273,7 +273,9 @@ derselben GUID kann Symcon nicht gleichzeitig laden.
 |---|---|---|
 | Pegelaktuell | Pegelstand aktuell | PGL.Pegelstand (cm) |
 | Tendenz | Tendenz | PGL.Tendenz (−1 fallend, 0 gleichbleibend, 1 steigend) |
-| Aenderung | Änderung | PGL.Rate (cm/h) |
+| Aenderung | Änderung | PGL.Rate (cm/h), Steigung der Regressionsgeraden im Tendenz-Zeitraum |
+| Aenderung1h | Änderung 1 Stunde | PGL.Differenz (cm), aktueller Wert − Wert vor 1 Stunde |
+| Aenderung24h | Änderung 24 Stunden | PGL.Differenz (cm), aktueller Wert − Wert vor 24 Stunden |
 | Abfluss | Abfluss | PGL.Abfluss (m³/s), nur wenn die Station Abfluss liefert |
 | Messzeitpunkt | Messzeitpunkt | ~UnixTimestamp |
 | StatusMnwMhw | Status (MNW/MHW) | PGL.Status (0 unbekannt, 1 niedrig, 2 normal, 3 hoch) |
@@ -299,3 +301,4 @@ Debug-Ausgaben (URLs, Antworten) im Debug-Fenster der Instanz.
 - Abfluss, Messzeitpunkt, Status MNW/MHW und NSW/HSW, Alarmstufen
 - Stationsliste dynamisch statt fest im Formular, Intervall in Minuten, HTTP-Timeout, Instanzstatus
 - Profile korrigiert, kein Abruf vor dem Kernel-Start
+- Änderung über 1 Stunde und 24 Stunden (Wert, der zum jeweiligen Zeitpunkt gültig war)
