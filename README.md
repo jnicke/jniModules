@@ -7,6 +7,7 @@ Eigene IP-Symcon-Module von jnicke.
 | [jniFeiertage](#jnifeiertage) | Zeigt an, ob heute ein Feiertag ist |
 | [jniEnergyForecast](#jnienergyforecast) | Verbrauchsprognose mit Kostenrechnung und Diagrammen |
 | [jniVVOAbfahrt](#jnivvoabfahrt) | Abfahrtsmonitor für DVB/VVO-Haltestellen mit Echtzeit |
+| [jniPegelstand](#jnipegelstand) | Wasserstand, Abfluss, Tendenz und Alarmstufe einer PEGELONLINE-Messstation |
 
 ---
 
@@ -233,3 +234,68 @@ VVO_LadeSteige(int $InstanceID);                   // Lage der Steige für die K
 - Countdown bis zum nächsten Abruf, größere Schrift in der WebHook-Ansicht
 - Karte mit den Steigen, blinkender Steig der nächsten Abfahrt, eigener Standort
 - Fußweg je Steig aus der Entfernung zum Standort (mit manueller Korrektur je Steig)
+
+---
+
+## jniPegelstand
+
+Wasserstand einer Messstation von [PEGELONLINE](https://www.pegelonline.wsv.de/) (Wasserstraßen- und
+Schifffahrtsverwaltung des Bundes), z. B. Elbe / Pegel Dresden.
+
+### Herkunft / Lizenz
+
+Überarbeitete Fassung von [SymconPegelstand](https://github.com/nik78476/SymconPegelstand) von
+**Mike Fröhlich (nik78476)**, zuvor als Fork [jniSymconPegelstand](https://github.com/jnicke/jniSymconPegelstand).
+Das Original steht unter [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/); diese Lizenz gilt
+auch für jniPegelstand.
+
+### Umstieg vom Original-Modul
+
+Modul-GUID `{1BB853CC-67CE-41BC-801F-33359361D6CB}` und Prefix `PGL` sind gleich geblieben. Dadurch arbeiten
+bestehende Instanzen weiter, die Variablen `Pegelaktuell` und `Tendenz` behalten Objekt-ID und Archiv.
+
+**Wichtig:** Vorher die Store-Version (SymconPegelstand von nik78476) bzw. den Fork entfernen – zwei Module mit
+derselben GUID kann Symcon nicht gleichzeitig laden.
+
+### Konfiguration
+
+- **Mess-Station**: Auswahl aus der Stationsliste von PEGELONLINE (*Gewässer – Station (km)*), täglich neu geladen,
+  sofort über *Stationsliste neu laden*
+- **Aktualisierungsintervall** in Minuten (Standard 15, PEGELONLINE liefert meist 15-Minuten-Werte)
+- **Tendenz**: Zeitraum (Standard 3 h) und Schwelle (Standard 2 cm); die Tendenz wird per Regressionsgerade aus allen
+  Messwerten des Zeitraums berechnet
+- **Alarmstufen 1–4** in cm (0 = nicht genutzt), für die Elbe in Dresden laut Landeshochwasserzentrum Sachsen
+  400 / 500 / 600 / 700 cm (vor Nutzung prüfen)
+
+### Variablen
+
+| Ident | Name | Profil |
+|---|---|---|
+| Pegelaktuell | Pegelstand aktuell | PGL.Pegelstand (cm) |
+| Tendenz | Tendenz | PGL.Tendenz (−1 fallend, 0 gleichbleibend, 1 steigend) |
+| Aenderung | Änderung | PGL.Rate (cm/h) |
+| Abfluss | Abfluss | PGL.Abfluss (m³/s), nur wenn die Station Abfluss liefert |
+| Messzeitpunkt | Messzeitpunkt | ~UnixTimestamp |
+| StatusMnwMhw | Status (MNW/MHW) | PGL.Status (0 unbekannt, 1 niedrig, 2 normal, 3 hoch) |
+| StatusNswHsw | Status Schifffahrt (NSW/HSW) | PGL.Status |
+| Alarmstufe | Alarmstufe | PGL.Alarmstufe (0–4), nur wenn Richtwerte gesetzt |
+
+Alles klassische Variablenprofile und damit direkt in IPSView nutzbar.
+
+### Befehlsreferenz
+
+```php
+PGL_Update(int $InstanceID);           // Werte sofort abrufen
+PGL_ReloadStations(int $InstanceID);   // Stationsliste neu von PEGELONLINE laden
+```
+
+Debug-Ausgaben (URLs, Antworten) im Debug-Fenster der Instanz.
+
+### ChangeLog
+
+20.11.2026
+- Neu in jniModules: jniPegelstand (aus SymconPegelstand 1.6 / jniSymconPegelstand 1.7)
+- Tendenz per Regression über einstellbaren Zeitraum statt Vergleich mit dem Vorabruf, dazu Änderung in cm/h
+- Abfluss, Messzeitpunkt, Status MNW/MHW und NSW/HSW, Alarmstufen
+- Stationsliste dynamisch statt fest im Formular, Intervall in Minuten, HTTP-Timeout, Instanzstatus
+- Profile korrigiert, kein Abruf vor dem Kernel-Start

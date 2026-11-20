@@ -1,0 +1,121 @@
+{
+    "elements": [
+        {
+            "type": "Label",
+            "caption": "jniPegelstand – Daten von PEGELONLINE (Wasserstraßen- und Schifffahrtsverwaltung des Bundes)"
+        },
+        {
+            "type": "Select",
+            "name": "PEGELSTATION",
+            "caption": "Mess-Station",
+            "width": "600px",
+            "options": []
+        },
+        {
+            "type": "NumberSpinner",
+            "name": "UpdateMinutes",
+            "caption": "Aktualisierungsintervall",
+            "suffix": "Minuten",
+            "minimum": 1,
+            "maximum": 1440
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Tendenz",
+            "items": [
+                {
+                    "type": "Label",
+                    "caption": "Die Tendenz wird aus allen Messwerten des gewählten Zeitraums berechnet (Regressionsgerade). Liegt die Änderung im Zeitraum unter der Schwelle, gilt der Pegel als gleichbleibend."
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "TrendHours",
+                    "caption": "Zeitraum",
+                    "suffix": "Stunden",
+                    "minimum": 1,
+                    "maximum": 48
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "TrendThreshold",
+                    "caption": "Schwelle",
+                    "suffix": "cm",
+                    "digits": 1,
+                    "minimum": 0
+                }
+            ]
+        },
+        {
+            "type": "ExpansionPanel",
+            "caption": "Alarmstufen",
+            "items": [
+                {
+                    "type": "Label",
+                    "caption": "Richtwerte der Hochwasser-Alarmstufen in cm (0 = nicht genutzt). Werte für den eigenen Pegel beim zuständigen Landeshochwasserzentrum nachsehen."
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "Alarmstufe1",
+                    "caption": "Alarmstufe 1",
+                    "suffix": "cm",
+                    "minimum": 0
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "Alarmstufe2",
+                    "caption": "Alarmstufe 2",
+                    "suffix": "cm",
+                    "minimum": 0
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "Alarmstufe3",
+                    "caption": "Alarmstufe 3",
+                    "suffix": "cm",
+                    "minimum": 0
+                },
+                {
+                    "type": "NumberSpinner",
+                    "name": "Alarmstufe4",
+                    "caption": "Alarmstufe 4",
+                    "suffix": "cm",
+                    "minimum": 0
+                }
+            ]
+        }
+    ],
+    "actions": [
+        {
+            "type": "Button",
+            "caption": "Jetzt aktualisieren",
+            "onClick": "PGL_Update($id);"
+        },
+        {
+            "type": "Button",
+            "caption": "Stationsliste neu laden",
+            "onClick": "PGL_ReloadStations($id);"
+        }
+    ],
+    "status": [
+        {
+            "code": 102,
+            "icon": "active",
+            "caption": "Aktiv"
+        },
+        {
+            "code": 104,
+            "icon": "inactive",
+            "caption": "Keine Mess-Station gewählt"
+        },
+        {
+            "code": 201,
+            "icon": "error",
+            "caption": "PEGELONLINE nicht erreichbar"
+        },
+        {
+            "code": 202,
+            "icon": "error",
+            "caption": "Mess-Station unbekannt oder ohne Wasserstand"
+        }
+    ]
+}

@@ -1,0 +1,18 @@
+{
+    "id": "{1BB853CC-67CE-41BC-801F-33359361D6CB}",
+    "name": "jniPegelstand",
+    "type": 3,
+    "vendor": "PEGELONLINE (WSV)",
+    "aliases":
+    [
+        "Pegelstandsanzeige",
+        "Pegelstand",
+        "PEGELONLINE",
+        "jniPegelstand"
+    ],
+    "url": "https://www.pegelonline.wsv.de",
+    "parentRequirements": [],
+    "childRequirements": [],
+    "implemented": [],
+    "prefix": "PGL"
+}
